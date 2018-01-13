@@ -19,7 +19,6 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_integer('batch_size', 24,
                             """Batch size.""")
 tf.app.flags.DEFINE_integer('num_batches', 300,
-#tf.app.flags.DEFINE_integer('num_batches', 10,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_string('data_format', 'NHWC',
                            """The data format for Convnet operations.
@@ -167,7 +166,6 @@ def main(_):
     run_benchmark()
     program_end_time = time.time()
     print('Program finished, Total seconds: %s' % (program_end_time - program_start_time))
-
 
 if __name__ == '__main__':
     tf.app.run()
