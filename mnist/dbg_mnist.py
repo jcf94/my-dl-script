@@ -5,7 +5,7 @@ from datetime import datetime
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
 PID = os.getpid()
 print('Program pid:', PID)
@@ -14,6 +14,7 @@ os.system("read")
 
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
+# CONFIG.log_device_placement=True
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -50,6 +51,14 @@ def simple_dnn():
         correct_prediction = tf.cast(correct_prediction, tf.float32)
     
     accuracy = tf.reduce_mean(correct_prediction)
+
+#    name = get_names()
+#    for item in name:
+#        print(item)
+
+#    tensor = get_tensors()
+#    for item in tensor:
+#        print(item)
     
     with tf.Session(config=CONFIG) as sess:
         num_steps_burn_in = 10
@@ -152,6 +161,7 @@ def simple_cnn():
     # train_writer = tf.summary.FileWriter(graph_location)
     # train_writer.add_graph(tf.get_default_graph())
 
+    
     with tf.Session(config=CONFIG) as sess:
         num_steps_burn_in = 10
         total_duration = 0.0
@@ -196,9 +206,15 @@ def bias_variable(shape):
     initial = tf.constant(0.1, shape=shape)
     return tf.Variable(initial)
 
+def get_names(graph=tf.get_default_graph()):
+    return [t.name for op in graph.get_operations() for t in op.values()]
+
+def get_tensors(graph=tf.get_default_graph()):
+    return [t for op in graph.get_operations() for t in op.values()]
+
 def main(_):
     program_start_time = time.time()
-    simple_cnn()
+    simple_dnn()
     program_end_time = time.time()
     print('Program finished, Total seconds: %s' % (program_end_time - program_start_time))
 
