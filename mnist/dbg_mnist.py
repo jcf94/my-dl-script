@@ -5,7 +5,7 @@ from datetime import datetime
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 PID = os.getpid()
 print('Program pid:', PID)
@@ -14,7 +14,7 @@ os.system("read")
 
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
-# CONFIG.log_device_placement=True
+CONFIG.log_device_placement=True
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -214,7 +214,7 @@ def get_tensors(graph=tf.get_default_graph()):
 
 def main(_):
     program_start_time = time.time()
-    simple_dnn()
+    simple_cnn()
     program_end_time = time.time()
     print('Program finished, Total seconds: %s' % (program_end_time - program_start_time))
 
