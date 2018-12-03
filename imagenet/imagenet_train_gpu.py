@@ -10,7 +10,7 @@ import math
 import time
 import six
 
-from vgg.vgg_model import Vgg
+from vgg.model import Vgg
 
 # ----- CPU / GPU Set
 
