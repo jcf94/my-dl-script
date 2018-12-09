@@ -5,8 +5,6 @@ from datetime import datetime
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
-
 PID = os.getpid()
 print('Program pid:', PID)
 print('Pause here to enter DBG')
@@ -27,9 +25,9 @@ FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_integer('batch_size', 100,
                             """Batch size.""")
-tf.app.flags.DEFINE_integer('num_batches', 10000,
+tf.app.flags.DEFINE_integer('num_batches', 20,
                             """Number of batches to run.""")
-tf.app.flags.DEFINE_integer('print_steps', 1000,
+tf.app.flags.DEFINE_integer('print_steps', 10,
                             """Number of steps when log.""")
 
 def simple_dnn(cluster, server):
@@ -251,11 +249,17 @@ def main(_):
     worker_hosts = FLAGS.worker_hosts.split(",")
 
     cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
-    server = tf.train.Server(cluster,
-                            job_name=FLAGS.job_name,
-                            task_index=FLAGS.task_index, protocol="grpc")
 
     if FLAGS.job_name == "ps":
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    elif FLAGS.job_name == "worker":
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    server = tf.train.Server(cluster,
+                            job_name=FLAGS.job_name,
+                            task_index=FLAGS.task_index, protocol="grpc+verbs")
+
+    if FLAGS.job_name == "ps":
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
         server.join()
     elif FLAGS.job_name == "worker":
         program_start_time = time.time()

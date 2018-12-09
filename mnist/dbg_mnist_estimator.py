@@ -337,9 +337,9 @@ def cnn_model_fn(features, labels, mode):
 def mnist_input_fn(batch_size, one_hot=False):
     mnist = input_data.read_data_sets('MNIST_data', one_hot=one_hot)
 
-    batch = mnist.train.next_batch(batch_size)
-
-    return batch[0], batch[1]
+    while (True):
+        batch = mnist.train.next_batch(batch_size)
+        yield {'features':batch[0], 'labels':batch[1]}
 
 # cnn False/ dnn True
 def simple_estimator(model_fn, one_hot):

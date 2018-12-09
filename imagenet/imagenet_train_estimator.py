@@ -41,7 +41,6 @@ tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
 tf.app.flags.DEFINE_string('model', "vgg16",
                             """""")
-                            """ Use while_loop to run.""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
 
@@ -192,13 +191,6 @@ class BenchMark(object):
             total_duration_squared = 0.0
             sess.run(init_op)
 
-            if FLAGS.easgd:
-                sess.run(easgd_prepare)
-
-            if FLAGS.staged_vars:
-                for i in range(len(enqueue_ops)):
-                    sess.run(enqueue_ops[:(i + 1)])
-
             for i in range(FLAGS.num_batches + num_steps_burn_in):
                 start_time = time.time()
                 _ = sess.run(optimizer)
@@ -229,12 +221,57 @@ class BenchMark(object):
                     f.write(chrome_trace)
                 print('Chrome Trace File write in %s' % FLAGS.trace_file)
 
-def run_benchmark():
+class EstimatorBenchMark(object):
+    def __init__(self, image_size):
+        """init"""
+        self._image_size = image_size
+        if FLAGS.job_name:
+            self.worker_prefix = '/job:worker/task:%s' % FLAGS.task_index
+        else:
+            self.worker_prefix = ''
+        
+        self.cpu_device = '%s/cpu:0' % self.worker_prefix
+        self.gpu_devices = [
+            '%s/%s:%i' % (self.worker_prefix, 'gpu', i)
+            for i in range(FLAGS.num_gpus)
+        ]
+        if FLAGS.local_parameter_device == 'gpu':
+            self.param_server_device = self.gpu_devices[0]
+        else:
+            self.param_server_device = self.cpu_device
 
-    image_size = 224
+        self.replica_devices = [
+            tf.train.replica_device_setter(
+                worker_device=d,
+                ps_device=self.param_server_device,
+                ps_tasks=1) for d in self.gpu_devices
+        ]
 
-    bench = BenchMark()
+        self.global_step_device = self.param_server_device
+        self.v_mgr = None
 
+        def model_fn(features, labels, mode):
+
+            network = Vgg(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
+            last_layer = network.inference(features)
+
+            predictions = {
+                'classes': tf.argmax(input=last_layer, axis=1, name='classes'),
+                'probabilities': tf.nn.softmax(last_layer, name='softmax_tensor')
+            }
+
+            if (mode == tf.estimator.ModeKeys.PREDICT):
+                return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+
+            loss = network.loss(last_layer, labels)
+
+            # .............
+            # TODO
+
+            return loss
+
+
+def input_fn(bench, image_size):
     # ----------------------- Fake Input Images -----------------------
 
     with tf.device(bench.cpu_device), tf.name_scope('Fake_Input_Images'):
@@ -248,9 +285,17 @@ def run_benchmark():
 
         ori_labels = tf.Variable(tf.ones([FLAGS.batch_size], dtype=tf.int64), trainable=False)
 
-    # -----------------------------------------------------------------
+    return ori_images, ori_labels
 
-    return bench.do_step_run(image_size)
+def run_benchmark():
+
+    image_size = 224
+
+    #bench = BenchMark()
+    bench = EstimatorBenchMark(image_size)
+
+    benchmark_estimator = tf.estimator.Estimator(model_fn=model_fn, model_dir="estimator_train")
+    benchmark_estimator.train(lambda:input_fn(bench, image_size), steps=1000)
 
 def main(_):
     program_start_time = time.time()
