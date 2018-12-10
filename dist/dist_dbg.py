@@ -8,7 +8,7 @@ from tensorflow.examples.tutorials.mnist import input_data
 PID = os.getpid()
 print('Program pid:', PID)
 print('Pause here to enter DBG')
-os.system("read")
+os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
 
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
@@ -33,17 +33,11 @@ def simple_test(cluster, server):
         c = b.assign_add(a);
     
     init_op = tf.initialize_all_variables()
-    
-    sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
-                             summary_op=None,
-                             saver=None,
-                             init_op=init_op)
-    
-    with sv.managed_session(server.target, config=CONFIG) as sess:
 
+    with tf.Session(server.target, config=CONFIG) as sess:
+
+        sess.run(init_op)
         print(sess.run(c))
-
-    sv.stop()
 
 def main(_):
     ps_hosts = FLAGS.ps_hosts.split(",")
@@ -58,7 +52,7 @@ def main(_):
 
     server = tf.train.Server(cluster,
                             job_name=FLAGS.job_name,
-                            task_index=FLAGS.task_index, protocol="grpc")
+                            task_index=FLAGS.task_index, protocol="grpc+verbs")
 
     if FLAGS.job_name == "ps":
         server.join()

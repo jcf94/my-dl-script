@@ -14,9 +14,9 @@ CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
 
-tf.app.flags.DEFINE_string("ps_hosts", "",
+tf.app.flags.DEFINE_string("ps_hosts", "localhost:50000",
                            "Comma-separated list of hostname:port pairs")
-tf.app.flags.DEFINE_string("worker_hosts", "",
+tf.app.flags.DEFINE_string("worker_hosts", "localhost:50001",
                            "Comma-separated list of hostname:port pairs")
 tf.app.flags.DEFINE_string("job_name", "", "One of 'ps', 'worker'")
 tf.app.flags.DEFINE_integer("task_index", 0, "Index of task within the job")
@@ -25,7 +25,7 @@ FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_integer('batch_size', 100,
                             """Batch size.""")
-tf.app.flags.DEFINE_integer('num_batches', 20,
+tf.app.flags.DEFINE_integer('num_batches', 50,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('print_steps', 10,
                             """Number of steps when log.""")
@@ -253,18 +253,17 @@ def main(_):
     if FLAGS.job_name == "ps":
         os.environ['CUDA_VISIBLE_DEVICES'] = ''
     elif FLAGS.job_name == "worker":
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     server = tf.train.Server(cluster,
                             job_name=FLAGS.job_name,
                             task_index=FLAGS.task_index, protocol="grpc+verbs")
 
     if FLAGS.job_name == "ps":
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
         server.join()
     elif FLAGS.job_name == "worker":
         program_start_time = time.time()
-        simple_dnn(cluster, server)
-        #simple_cnn(cluster, server)
+        #simple_dnn(cluster, server)
+        simple_cnn(cluster, server)
         program_end_time = time.time()
         print('Program finished, Total seconds: %s' % (program_end_time - program_start_time))
 
