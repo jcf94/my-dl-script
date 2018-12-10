@@ -26,20 +26,14 @@ resnet_list = [ 'resnet50', 'resnet50_v1.5', 'resnet50_v2',
 
 class ResNet(object):
 
-    def __init__(self, image_size, data_format, batch_size, model):
+    def __init__(self, data_format, model):
         """ Init """
 
         if (model not in resnet_list):
             tf.errors.InvalidArgumentError(None, None, "Network Model not found.")
 
-        self._image_size = image_size
         self._data_format = data_format
         self._model = model.split("_")[0]
-
-        if self._data_format == 'NCHW':
-            self._image_shape = [batch_size, 3, self._image_size, self._image_size]
-        else:
-            self._image_shape = [batch_size, self._image_size, self._image_size, 3]
 
         if 'v2' in model:
             self.version = 'v2'
@@ -211,59 +205,6 @@ class ResNet(object):
             else:
                 bottleneck_block_v1(cnn, depth, depth_bottleneck, stride)
 
-        def residual_block(cnn, depth, stride, version, projection_shortcut=False):
-            """Residual block with identity short-cut.
-
-            Args:
-                cnn: the network to append residual blocks.
-                depth: the number of output filters for this residual block.
-                stride: Stride used in the first layer of the residual block.
-                version: version of ResNet to build.
-                projection_shortcut: indicator of using projection shortcut, even if top
-                size and depth are equal
-            """
-            pre_activation = True if version == 'v2' else False
-            input_layer = cnn.top_layer
-            in_size = cnn.top_size
-
-            if projection_shortcut:
-                shortcut = cnn.conv(
-                    depth, 1, 1, stride, stride, activation=None,
-                    use_batch_norm=True, input_layer=input_layer,
-                    num_channels_in=in_size, bias=None)
-            elif in_size != depth:
-                # Plan A of shortcut.
-                shortcut = cnn.apool(1, 1, stride, stride,
-                                    input_layer=input_layer,
-                                    num_channels_in=in_size)
-                padding = (depth - in_size) // 2
-                if cnn.channel_pos == 'channels_last':
-                    shortcut = tf.pad(
-                        shortcut, [[0, 0], [0, 0], [0, 0], [padding, padding]])
-                else:
-                    shortcut = tf.pad(
-                        shortcut, [[0, 0], [padding, padding], [0, 0], [0, 0]])
-            else:
-                shortcut = input_layer
-            if pre_activation:
-                res = cnn.batch_norm(input_layer)
-                res = tf.nn.relu(res)
-            else:
-                res = input_layer
-            cnn.conv(depth, 3, 3, stride, stride,
-                    input_layer=res, num_channels_in=in_size,
-                    use_batch_norm=True, bias=None)
-            if pre_activation:
-                res = cnn.conv(depth, 3, 3, 1, 1, activation=None,
-                            use_batch_norm=False, bias=None)
-                output = shortcut + res
-            else:
-                res = cnn.conv(depth, 3, 3, 1, 1, activation=None,
-                            use_batch_norm=True, bias=None)
-                output = tf.nn.relu(shortcut + res)
-            cnn.top_layer = output
-            cnn.top_size = depth
-
         assert len(num_conv_layers) == 4
         cnn.use_batch_norm = True
         cnn.batch_norm_config = {'decay': 0.9, 'epsilon': 1e-5, 'scale': True}
@@ -286,9 +227,3 @@ class ResNet(object):
         last = cnn.spatial_mean()
 
         return last
-
-    def loss(self, logits, labels):
-        with tf.name_scope('xentropy'):
-            cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=logits, labels=labels)
-            loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
-        return loss

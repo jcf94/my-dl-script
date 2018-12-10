@@ -17,20 +17,14 @@ vgg_list = ['vgg11', 'vgg16', 'vgg19']
 
 class Vgg(object):
 
-    def __init__(self, image_size, data_format, batch_size, model):
+    def __init__(self, data_format, model):
         """ Init """
 
         if (model not in vgg_list):
             tf.errors.InvalidArgumentError(None, None, "Network Model not found.")
 
-        self._image_size = image_size
         self._data_format = data_format
         self._model = model
-
-        if self._data_format == 'NCHW':
-            self._image_shape = [batch_size, 3, self._image_size, self._image_size]
-        else:
-            self._image_shape = [batch_size, self._image_size, self._image_size, 3]
 
     def inference(self, images):
         with tf.variable_scope('Vgg', reuse=tf.AUTO_REUSE):
@@ -72,9 +66,3 @@ class Vgg(object):
         last = cnn.affine(1000, activation=None)
 
         return last
-
-    def loss(self, logits, labels):
-        with tf.name_scope('xentropy'):
-            cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=logits, labels=labels)
-            loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
-        return loss

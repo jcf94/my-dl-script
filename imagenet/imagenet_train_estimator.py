@@ -41,15 +41,26 @@ tf.app.flags.DEFINE_integer('task_index', 0,
                             """""")
 tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
-tf.app.flags.DEFINE_string('model', "resnet152_v2",
+tf.app.flags.DEFINE_string('model', "inception4",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
 
 class EstimatorBenchMark(object):
-    def __init__(self, image_size):
-        """init"""
-        self._image_size = image_size
+    def __init__(self, model, data_format, batch_size):
+        """ init """
+
+        if (model[:3] == 'vgg'):
+            self._network = Vgg(data_format, model)
+        elif (model[:6] == 'resnet'):
+            self._network = ResNet(data_format, model)
+        elif (model[:9] == 'inception'):
+            self._network = Inception(data_format, model)
+
+        self._model = model
+        self._data_format = data_format
+        self._batch_size = batch_size
+
         if FLAGS.job_name:
             self.worker_prefix = '/job:worker/task:%s' % FLAGS.task_index
         else:
@@ -77,14 +88,7 @@ class EstimatorBenchMark(object):
 
         def model_fn(features, labels, mode):
 
-            if (FLAGS.model[:3] == 'vgg'):
-                network = Vgg(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
-            elif (FLAGS.model[:6] == 'resnet'):
-                network = ResNet(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
-            elif (FLAGS.model[:9] == 'inception'):
-                network = Inception(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
-
-            last_layer = network.inference(features)
+            last_layer = self._network.inference(features)
 
             predictions = {
                 'classes': tf.argmax(input=last_layer, axis=1, name='classes'),
@@ -94,7 +98,9 @@ class EstimatorBenchMark(object):
             if (mode == tf.estimator.ModeKeys.PREDICT):
                 return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 
-            loss = network.loss(last_layer, labels)
+            with tf.name_scope('xentropy'):
+                cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=last_layer, labels=labels)
+                loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
 
             with tf.name_scope('accuracy'):
                 accuracy = tf.metrics.accuracy(labels=labels,
@@ -117,42 +123,39 @@ class EstimatorBenchMark(object):
 
         def fake_input_fn():
 
-            image_size = self._image_size
+            if (self._model[:9] == "inception"):
+                image_size = 299
+            else:
+                image_size = 224
+
+            if self._data_format == 'NCHW':
+                image_shape = [self._batch_size, 3, image_size, image_size]
+            else:
+                image_shape = [self._batch_size, image_size, image_size, 3]
 
             # ----------------------- Fake Input Images -----------------------
             with tf.device(self.cpu_device), tf.name_scope('Fake_Input_Images'):
-                if FLAGS.data_format == 'NCHW':
-                    image_shape = [FLAGS.batch_size, 3, image_size, image_size]
-                else:
-                    image_shape = [FLAGS.batch_size, image_size, image_size, 3]
                 ori_images = tf.Variable(tf.random_normal(image_shape,
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
-
-                ori_labels = tf.Variable(tf.ones([FLAGS.batch_size], dtype=tf.int64), trainable=False)
+                ori_labels = tf.Variable(tf.ones([self._batch_size], dtype=tf.int64), trainable=False)
 
             return ori_images, ori_labels
 
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
-    def run(self):
+    def run(self, steps):
 
-        benchmark_estimator = tf.estimator.Estimator(model_fn=self._model_fn, model_dir="estimator_train")
-
-        benchmark_estimator.train(lambda:self._input_fn(), steps=100)
+        benchmark_estimator = tf.estimator.Estimator(self._model_fn, "estimator_train")
+        benchmark_estimator.train(self._input_fn, steps=steps)
 
 def run_benchmark():
 
-    if (FLAGS.model[:9] == "inception"):
-        image_size = 299
-    else:
-        image_size = 224
-
-    bench = EstimatorBenchMark(image_size)
+    bench = EstimatorBenchMark(FLAGS.model, FLAGS.data_format, FLAGS.batch_size)
 
     tf.logging.set_verbosity(tf.logging.INFO)
-    bench.run()
+    bench.run(FLAGS.num_batches)
 
 def main(_):
     program_start_time = time.time()
