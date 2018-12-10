@@ -1,14 +1,7 @@
-import tensorflow.python.platform
 import tensorflow as tf
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import data_flow_ops, state_ops, math_ops
-from tensorflow.python.ops import variable_scope, control_flow_ops
-from tensorflow.python.client import timeline
 from datetime import datetime
 import os
-import math
 import time
-import six
 
 from model_vgg import Vgg
 from model_resnet import ResNet
@@ -16,7 +9,7 @@ from model_inception import Inception
 
 # ----- CPU / GPU Set
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
@@ -41,7 +34,7 @@ tf.app.flags.DEFINE_integer('task_index', 0,
                             """""")
 tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
-tf.app.flags.DEFINE_string('model', "inception4",
+tf.app.flags.DEFINE_string('model', "resnet152",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
@@ -103,23 +96,25 @@ class EstimatorBenchMark(object):
                 loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
 
             with tf.name_scope('accuracy'):
-                accuracy = tf.metrics.accuracy(labels=labels,
-                predictions=predictions['classes'], name='accuracy')
+                accuracy = tf.metrics.accuracy(labels=labels, predictions=predictions['classes'], name='accuracy')
                 batch_accuracy = tf.reduce_mean(tf.cast(tf.equal(labels, predictions['classes']), tf.float32))
             
             eval_metric_ops = {'accuracy': accuracy}
 
-            tf.summary.scalar('accuracy', batch_accuracy)
+            # with tf.device(self.cpu_device):
+            #     tf.summary.scalar('accuracy', batch_accuracy)
 
             if (mode == tf.estimator.ModeKeys.EVAL):
                 return tf.estimator.EstimatorSpec(mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
-            logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy, "step": tf.train.get_global_step()}, every_n_iter=10)
+            logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy,
+                            "step": tf.train.get_global_step()}, every_n_iter=10)
 
             if (mode == tf.estimator.ModeKeys.TRAIN):
                 with tf.name_scope('GD_Optimizer'):
                     train_step = tf.train.GradientDescentOptimizer(0.001).minimize(loss, tf.train.get_global_step())
-                return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_step, eval_metric_ops=eval_metric_ops, training_hooks=[logging_hook])
+                return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_step,
+                        eval_metric_ops=eval_metric_ops, training_hooks=[logging_hook])
 
         def fake_input_fn():
 
@@ -139,16 +134,26 @@ class EstimatorBenchMark(object):
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
                 ori_labels = tf.Variable(tf.ones([self._batch_size], dtype=tf.int64), trainable=False)
+                images = tf.data.Dataset.from_tensors(ori_images).repeat(100)
+                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(100)
 
-            return ori_images, ori_labels
+                return tf.data.Dataset.zip((images, labels))
 
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
     def run(self, steps):
 
-        benchmark_estimator = tf.estimator.Estimator(self._model_fn, "estimator_train")
+        #distribution = TestStrategy()
+        distribution = None
+        estimator_config = tf.estimator.RunConfig(session_config=CONFIG, train_distribute=distribution)
+        benchmark_estimator = tf.estimator.Estimator(self._model_fn, "estimator_train", config=estimator_config)
         benchmark_estimator.train(self._input_fn, steps=steps)
+
+# TODO: Try to override some key function to realize my own Strategy
+class TestStrategy(tf.contrib.distribute.MirroredStrategy):
+    def __init__(self):
+        super(TestStrategy, self).__init__()
 
 def run_benchmark():
 

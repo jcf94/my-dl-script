@@ -224,6 +224,7 @@ class ResNet(object):
         if self.version == 'v2':
             cnn.batch_norm()
             cnn.top_layer = tf.nn.relu(cnn.top_layer)
-        last = cnn.spatial_mean()
+        cnn.spatial_mean()
+        last = cnn.affine(1000, activation=None)
 
         return last

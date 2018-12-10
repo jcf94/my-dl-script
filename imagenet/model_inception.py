@@ -122,7 +122,8 @@ class Inception(object):
         inception_v3_e(cnn, 'avg')               # 8 x 8 x 2048 mixed_9
         inception_v3_e(cnn, 'max')               # 8 x 8 x 2048 mixed_10
         cnn.apool(8, 8, 1, 1, 'VALID')           # 8 x 8 x 2048
-        last = cnn.reshape([-1, 2048])                  # 1 x 1 x 2048
+        cnn.reshape([-1, 2048])                  # 1 x 1 x 2048
+        last = cnn.affine(1000, activation=None)
 
         return last
 
@@ -201,6 +202,7 @@ class Inception(object):
         for _ in range(3):
             inception_v4_c(cnn)
         cnn.spatial_mean()
-        last = cnn.dropout(0.8)
+        cnn.dropout(0.8)
+        last = cnn.affine(1000, activation=None)
 
         return last
