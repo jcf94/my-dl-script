@@ -1,8 +1,15 @@
 import tensorflow as tf
 
+vgg_list = ['vgg11', 'vgg16', 'vgg19']
+
 class Vgg(object):
+
     def __init__(self, image_size, data_format, batch_size, model):
-        """Init"""
+        """ Init """
+
+        if (model not in vgg_list):
+            tf.errors.InvalidArgumentError(None, None, "Network Model not found.")
+
         self._conv_counter = 0
         self._pool_counter = 0
         self._affine_counter = 0
@@ -76,7 +83,7 @@ class Vgg(object):
         return loss
 
     def inference(self, images):
-        with tf.variable_scope('cg', reuse=tf.AUTO_REUSE):
+        with tf.variable_scope('Vgg', reuse=tf.AUTO_REUSE):
             if self._model == 'vgg11':
                 return self._construct_vgg(images, [1, 1, 2, 2, 2])
 

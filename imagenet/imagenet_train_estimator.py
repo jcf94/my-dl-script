@@ -10,7 +10,8 @@ import math
 import time
 import six
 
-from vgg.model import Vgg
+from vgg_model import Vgg
+from resnet_model import ResNet
 
 # ----- CPU / GPU Set
 
@@ -39,7 +40,7 @@ tf.app.flags.DEFINE_integer('task_index', 0,
                             """""")
 tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
-tf.app.flags.DEFINE_string('model', "vgg16",
+tf.app.flags.DEFINE_string('model', "resnet50",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
@@ -75,7 +76,11 @@ class EstimatorBenchMark(object):
 
         def model_fn(features, labels, mode):
 
-            network = Vgg(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
+            if (FLAGS.model[:3] == 'vgg'):
+                network = Vgg(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
+            elif (FLAGS.model[:6] == 'resnet'):
+                network = ResNet(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
+
             last_layer = network.inference(features)
 
             predictions = {
@@ -107,8 +112,6 @@ class EstimatorBenchMark(object):
                     train_step = tf.train.GradientDescentOptimizer(0.001).minimize(loss, tf.train.get_global_step())
                 return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_step, eval_metric_ops=eval_metric_ops, training_hooks=[logging_hook])
 
-        self._model_fn = model_fn
-
         def fake_input_fn():
 
             image_size = self._image_size
@@ -127,6 +130,7 @@ class EstimatorBenchMark(object):
 
             return ori_images, ori_labels
 
+        self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
     def run(self):
@@ -137,10 +141,7 @@ class EstimatorBenchMark(object):
 
 def run_benchmark():
 
-    image_size = 224
-
-    #bench = BenchMark()
-    bench = EstimatorBenchMark(image_size)
+    bench = EstimatorBenchMark(224)
 
     tf.logging.set_verbosity(tf.logging.INFO)
     bench.run()
