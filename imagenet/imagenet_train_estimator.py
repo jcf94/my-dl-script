@@ -44,183 +44,6 @@ tf.app.flags.DEFINE_string('model', "vgg16",
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
 
-class VariableMgrLocalFetchFromPS(object):
-    def __init__(self, bench):
-        self.bench = bench
-        self.gpu_devices = bench.gpu_devices
-        self.vars_on_devices = [
-            dict() for _ in self.gpu_devices
-        ]
-
-    def trainable_variables_on_device(self,
-                                    rel_device_num,
-                                    writable=False):
-        return self.custom_getter.trainable_variables_on_device(
-            rel_device_num, writable=writable)
-
-    def create_outer_variable_scope(self, device_num):
-        self.custom_getter = VariableGetter(self, device_num)
-        return tf.variable_scope(
-            'v', reuse=bool(device_num), custom_getter=self.custom_getter)
-
-class VariableGetter(object):
-    def __init__(self, variable_mgr, device_num):
-        self.variable_mgr = variable_mgr
-        self.device_num = device_num
-    
-    def __call__(self, getter, name, *args, **kwargs):
-        vars_on_devices = self.variable_mgr.vars_on_devices[self.device_num]
-
-        if name in vars_on_devices:
-            real_var = vars_on_devices[name]
-            get_op = tf.identity(real_var)
-            return get_op
-
-        with tf.device(self.variable_mgr.bench.param_server_device):
-            real_var = getter(name, *args, **kwargs)
-
-        trainable = kwargs['trainable']
-
-        if trainable:
-            vars_on_devices[name] = real_var
-            return tf.identity(real_var)
-        else:
-            return real_var
-
-    def trainable_variables_on_device(self, rel_device_num,
-                                        writable):
-        params_refs = tf.trainable_variables()
-        if writable:
-            return params_refs
-        params = []
-        for param in params_refs:
-            var_name = param.name.split(':')[0]
-            _, var_get_op = self.variable_mgr.staging_vars_on_devices[rel_device_num][
-                var_name]
-            params.append(var_get_op)
-        return params
-
-class BenchMark(object):
-    def __init__(self):
-        """Init"""
-        if FLAGS.job_name:
-            self.worker_prefix = '/job:worker/task:%s' % FLAGS.task_index
-        else:
-            self.worker_prefix = ''
-        
-        self.cpu_device = '%s/cpu:0' % self.worker_prefix
-        self.gpu_devices = [
-            '%s/%s:%i' % (self.worker_prefix, 'gpu', i)
-            for i in range(FLAGS.num_gpus)
-        ]
-        if FLAGS.local_parameter_device == 'gpu':
-            self.param_server_device = self.gpu_devices[0]
-        else:
-            self.param_server_device = self.cpu_device
-
-        self.replica_devices = [
-            tf.train.replica_device_setter(
-                worker_device=d,
-                ps_device=self.param_server_device,
-                ps_tasks=1) for d in self.gpu_devices
-        ]
-
-        self.global_step_device = self.param_server_device
-        self.v_mgr = None
-
-    def build_network(self, image_size):
-        grads_list = []
-        if not self.v_mgr:
-            self.v_mgr = VariableMgrLocalFetchFromPS(self)
-        v_mgr = self.v_mgr
-
-        for device_index, device_name in enumerate(self.replica_devices):
-            network = Vgg(image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
-            with tf.name_scope('tower_%i' % device_index):
-                # -------------------------------------------------------------------
-
-                with tf.device(self.gpu_devices[device_index]), tf.variable_scope('Gpu_%i_Own' % device_index, reuse=tf.AUTO_REUSE):
-                    images = tf.get_variable('gpu_cache_images', network._image_shape, tf.float32,
-                                            tf.truncated_normal_initializer(1e-1), trainable=False)
-
-                    #labels = tf.Variable(tf.ones([FLAGS.batch_size], dtype=tf.int64), trainable=False, name='gpu_cache_labels')
-                    labels = tf.random_uniform(
-                        [FLAGS.batch_size],
-                        minval=0,
-                        maxval=1000,
-                        dtype=tf.int32,
-                        name='synthetic_labels')
-
-                # -------------------------------------------------------------------
-                with tf.device(device_name), v_mgr.create_outer_variable_scope(device_index):
-                    last_layer = network.inference(images)
-                    loss = network.loss(last_layer, labels)
-                    varis = tf.trainable_variables()
-                    grads = tf.gradients(loss, varis, aggregation_method=tf.AggregationMethod.DEFAULT)
-
-                    grads_list.append(grads)
-
-        # -------------------------------------------------------------------
-
-        with tf.device(self.param_server_device):
-            if FLAGS.num_gpus > 1:
-                average_grads = []
-                for grads in zip(*grads_list):
-                    average_grads.append(tf.multiply(tf.add_n(grads), 1.0 / FLAGS.num_gpus))
-                grads_and_varis = list(zip(average_grads, varis))
-            else:
-                grads_and_varis = list(zip(grads_list[0], varis))
-            optimizer = tf.train.GradientDescentOptimizer(0.01).apply_gradients(grads_and_varis, tf.train.get_or_create_global_step())
-
-        return optimizer
-
-    def do_step_run(self, image_size):
-        print('|------ Start Per_step Run')
-
-        optimizer = self.build_network(image_size)
-        enqueue_ops = None
-
-        init_op = [tf.global_variables_initializer(), tf.local_variables_initializer()]
-
-        with tf.Session(config=CONFIG) as sess:
-
-            tf.summary.FileWriter("./", sess.graph)
-
-            num_steps_burn_in = 10
-            total_duration = 0.0
-            total_duration_squared = 0.0
-            sess.run(init_op)
-
-            for i in range(FLAGS.num_batches + num_steps_burn_in):
-                start_time = time.time()
-                _ = sess.run(optimizer)
-                duration = time.time() - start_time
-                if i > num_steps_burn_in:
-                    if not i % 10:
-                        picps = FLAGS.num_gpus * FLAGS.batch_size / duration
-                        print('%s: step %d, duration = %.3f, speed = %.3f pics/s' %
-                            (datetime.now(), i - num_steps_burn_in, duration, picps))
-                    total_duration += duration
-                    total_duration_squared += duration * duration
-
-            mn = total_duration / FLAGS.num_batches
-            vr = total_duration_squared / FLAGS.num_batches - mn * mn
-            sd = math.sqrt(vr)
-            print('%s: %s across %d steps, %.3f +/- %.3f sec / batch' %
-                (datetime.now(), "Forward_backword", FLAGS.num_batches, mn, sd))
-            picps = (FLAGS.num_gpus * FLAGS.num_batches * FLAGS.batch_size) / total_duration
-            print('%.3f pics/s' % picps)
-
-            if FLAGS.trace_file:
-                options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                run_metadata = tf.RunMetadata()
-                _ = sess.run(optimizer, options=options, run_metadata=run_metadata)
-                fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-                chrome_trace = fetched_timeline.generate_chrome_trace_format()
-                with open(FLAGS.trace_file, 'w') as f:
-                    f.write(chrome_trace)
-                print('Chrome Trace File write in %s' % FLAGS.trace_file)
-
 class EstimatorBenchMark(object):
     def __init__(self, image_size):
         """init"""
@@ -265,27 +88,52 @@ class EstimatorBenchMark(object):
 
             loss = network.loss(last_layer, labels)
 
-            # .............
-            # TODO
+            with tf.name_scope('accuracy'):
+                accuracy = tf.metrics.accuracy(labels=labels,
+                predictions=predictions['classes'], name='accuracy')
+                batch_accuracy = tf.reduce_mean(tf.cast(tf.equal(labels, predictions['classes']), tf.float32))
+            
+            eval_metric_ops = {'accuracy': accuracy}
 
-            return loss
+            tf.summary.scalar('accuracy', batch_accuracy)
 
+            if (mode == tf.estimator.ModeKeys.EVAL):
+                return tf.estimator.EstimatorSpec(mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
-def input_fn(bench, image_size):
-    # ----------------------- Fake Input Images -----------------------
+            logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy, "step": tf.train.get_global_step()}, every_n_iter=10)
 
-    with tf.device(bench.cpu_device), tf.name_scope('Fake_Input_Images'):
-        if FLAGS.data_format == 'NCHW':
-            image_shape = [FLAGS.batch_size, 3, image_size, image_size]
-        else:
-            image_shape = [FLAGS.batch_size, image_size, image_size, 3]
-        ori_images = tf.Variable(tf.random_normal(image_shape,
-                                                dtype=tf.float32,
-                                                stddev=1e-1), trainable=False)
+            if (mode == tf.estimator.ModeKeys.TRAIN):
+                with tf.name_scope('GD_Optimizer'):
+                    train_step = tf.train.GradientDescentOptimizer(0.001).minimize(loss, tf.train.get_global_step())
+                return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_step, eval_metric_ops=eval_metric_ops, training_hooks=[logging_hook])
 
-        ori_labels = tf.Variable(tf.ones([FLAGS.batch_size], dtype=tf.int64), trainable=False)
+        self._model_fn = model_fn
 
-    return ori_images, ori_labels
+        def fake_input_fn():
+
+            image_size = self._image_size
+
+            # ----------------------- Fake Input Images -----------------------
+            with tf.device(self.cpu_device), tf.name_scope('Fake_Input_Images'):
+                if FLAGS.data_format == 'NCHW':
+                    image_shape = [FLAGS.batch_size, 3, image_size, image_size]
+                else:
+                    image_shape = [FLAGS.batch_size, image_size, image_size, 3]
+                ori_images = tf.Variable(tf.random_normal(image_shape,
+                                                        dtype=tf.float32,
+                                                        stddev=1e-1), trainable=False)
+
+                ori_labels = tf.Variable(tf.ones([FLAGS.batch_size], dtype=tf.int64), trainable=False)
+
+            return ori_images, ori_labels
+
+        self._input_fn = fake_input_fn
+
+    def run(self):
+
+        benchmark_estimator = tf.estimator.Estimator(model_fn=self._model_fn, model_dir="estimator_train")
+
+        benchmark_estimator.train(lambda:self._input_fn(), steps=100)
 
 def run_benchmark():
 
@@ -294,8 +142,8 @@ def run_benchmark():
     #bench = BenchMark()
     bench = EstimatorBenchMark(image_size)
 
-    benchmark_estimator = tf.estimator.Estimator(model_fn=model_fn, model_dir="estimator_train")
-    benchmark_estimator.train(lambda:input_fn(bench, image_size), steps=1000)
+    tf.logging.set_verbosity(tf.logging.INFO)
+    bench.run()
 
 def main(_):
     program_start_time = time.time()
