@@ -1,3 +1,14 @@
+"""Vgg model configuration.
+
+Includes multiple models: vgg11, vgg16, vgg19, corresponding to
+  model A, D, and E in Table 1 of [1].
+
+References:
+[1]  Simonyan, Karen, Andrew Zisserman
+     Very Deep Convolutional Networks for Large-Scale Image Recognition
+     arXiv:1409.1556 (2014)
+"""
+
 import tensorflow as tf
 
 from convnet_builder import ConvNetBuilder
@@ -12,9 +23,6 @@ class Vgg(object):
         if (model not in vgg_list):
             tf.errors.InvalidArgumentError(None, None, "Network Model not found.")
 
-        self._conv_counter = 0
-        self._pool_counter = 0
-        self._affine_counter = 0
         self._image_size = image_size
         self._data_format = data_format
         self._model = model

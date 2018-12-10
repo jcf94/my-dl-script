@@ -10,8 +10,9 @@ import math
 import time
 import six
 
-from vgg_model import Vgg
-from resnet_model import ResNet
+from model_vgg import Vgg
+from model_resnet import ResNet
+from model_inception import Inception
 
 # ----- CPU / GPU Set
 
@@ -40,7 +41,7 @@ tf.app.flags.DEFINE_integer('task_index', 0,
                             """""")
 tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
-tf.app.flags.DEFINE_string('model', "resnet50",
+tf.app.flags.DEFINE_string('model', "resnet152_v2",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
@@ -80,6 +81,8 @@ class EstimatorBenchMark(object):
                 network = Vgg(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
             elif (FLAGS.model[:6] == 'resnet'):
                 network = ResNet(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
+            elif (FLAGS.model[:9] == 'inception'):
+                network = Inception(self._image_size, FLAGS.data_format, FLAGS.batch_size, FLAGS.model)
 
             last_layer = network.inference(features)
 
@@ -141,7 +144,12 @@ class EstimatorBenchMark(object):
 
 def run_benchmark():
 
-    bench = EstimatorBenchMark(224)
+    if (FLAGS.model[:9] == "inception"):
+        image_size = 299
+    else:
+        image_size = 224
+
+    bench = EstimatorBenchMark(image_size)
 
     tf.logging.set_verbosity(tf.logging.INFO)
     bench.run()
