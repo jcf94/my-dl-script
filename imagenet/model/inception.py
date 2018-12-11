@@ -24,7 +24,7 @@ References:
 
 import tensorflow as tf
 
-from convnet_builder import ConvNetBuilder
+from .convnet_builder import ConvNetBuilder
 
 inception_list = ['inception3', 'inception4']
 

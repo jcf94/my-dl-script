@@ -11,7 +11,7 @@ References:
 
 import tensorflow as tf
 
-from convnet_builder import ConvNetBuilder
+from .convnet_builder import ConvNetBuilder
 
 vgg_list = ['vgg11', 'vgg16', 'vgg19']
 

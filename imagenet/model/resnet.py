@@ -18,7 +18,7 @@ References:
 
 import tensorflow as tf
 
-from convnet_builder import ConvNetBuilder
+from .convnet_builder import ConvNetBuilder
 
 resnet_list = [ 'resnet50', 'resnet50_v1.5', 'resnet50_v2',
                 'resnet101', 'resnet101_v2',

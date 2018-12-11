@@ -3,9 +3,9 @@ from datetime import datetime
 import os
 import time
 
-from model_vgg import Vgg
-from model_resnet import ResNet
-from model_inception import Inception
+from model.vgg import Vgg
+from model.resnet import ResNet
+from model.inception import Inception
 
 # ----- CPU / GPU Set
 
@@ -34,7 +34,7 @@ tf.app.flags.DEFINE_integer('task_index', 0,
                             """""")
 tf.app.flags.DEFINE_integer('num_gpus', 1,
                             """""")
-tf.app.flags.DEFINE_string('model', "resnet152",
+tf.app.flags.DEFINE_string('model', "inception4",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
