@@ -41,7 +41,7 @@ class Inception(object):
         self._model = model
 
     def inference(self, images):
-        with tf.variable_scope('Inception', reuse=tf.AUTO_REUSE):
+        with tf.variable_scope(self._model, reuse=tf.AUTO_REUSE):
             if self._model == 'inception3':
                 return self._construct_inception3(images)
             if self._model == 'inception4':

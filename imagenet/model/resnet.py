@@ -43,7 +43,7 @@ class ResNet(object):
             self.version = 'v1'
 
     def inference(self, images):
-        with tf.variable_scope('ResNet', reuse=tf.AUTO_REUSE):
+        with tf.variable_scope(self._model, reuse=tf.AUTO_REUSE):
             if self._model == 'resnet50':
                 return self._construct_resnet(images, [3, 4, 6, 3])
 

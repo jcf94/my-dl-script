@@ -27,7 +27,7 @@ class Vgg(object):
         self._model = model
 
     def inference(self, images):
-        with tf.variable_scope('Vgg', reuse=tf.AUTO_REUSE):
+        with tf.variable_scope(self._model, reuse=tf.AUTO_REUSE):
             if self._model == 'vgg11':
                 return self._construct_vgg(images, [1, 1, 2, 2, 2])
 
