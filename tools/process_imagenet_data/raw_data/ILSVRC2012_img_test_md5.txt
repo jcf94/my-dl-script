@@ -1,0 +1,2 @@
+fe64ceb247e473635708aed23ab6d839  ILSVRC2012_img_test.tar
+fe64ceb247e473635708aed23ab6d839
