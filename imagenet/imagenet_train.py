@@ -6,6 +6,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
+from strategy import LocalPSStrategy
 
 # ----- CPU / GPU Set
 
@@ -38,6 +39,17 @@ tf.app.flags.DEFINE_string('model', "vgg11",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
+
+class DatasetInitializerHook(tf.train.SessionRunHook):
+    def __init__(self, iterator):
+        self._iterator = iterator
+
+    def begin(self):
+        self._initializer = self._iterator._initializer
+
+    def after_create_session(self, session, coord):
+        del coord
+        session.run(self._initializer)
 
 class BenchMark(object):
     def __init__(self):
@@ -125,7 +137,7 @@ class BenchMark(object):
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
-    def build_network(self, hooks, chief_only_hooks):
+    def build_network(self, hooks, chief_only_hooks, strategy):
         with tf.device(self._global_step_device):
             global_step = tf.train.get_or_create_global_step()
     
@@ -134,29 +146,16 @@ class BenchMark(object):
 
         # -------------- Network Model --------------
         gradients_list = []
-
         for index, gpu in enumerate(self.gpu_devices):
-            with tf.device(gpu), tf.name_scope('Tower_%i' % index):
+            with tf.device(gpu), tf.variable_scope('Tower_%i' % index, custom_getter=strategy):
                 features, labels = input_data_iterator.get_next()
                 loss, batch_accuracy = self._model_fn(features, labels)
 
-                optimizer = tf.train.GradientDescentOptimizer(0.001)
-                local_varis = tf.trainable_variables()
-                # print(local_varis.__len__())
+                local_varis = strategy.get_local_variable(index)
                 gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                 gradients_list.append(gradients)
 
-        with tf.name_scope('Gradient_Update'):
-            if self._num_gpus > 1:
-                average_gradients = []
-                for grads in zip(*gradients_list):
-                    average_gradients.append(tf.multiply(tf.add_n(grads), 1.0 / self._num_gpus))
-                # print(average_gradients.__len__())
-                grads_and_varis = list(zip(average_gradients, local_varis))
-            else:
-                grads_and_varis = list(zip(gradients_list[0], local_varis))
-
-            train_step = optimizer.apply_gradients(grads_and_varis, tf.train.get_global_step())
+        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
 
         # -------------- Run Hooks --------------
         logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy,
@@ -166,32 +165,23 @@ class BenchMark(object):
         input_hook = DatasetInitializerHook(input_data_iterator)
         chief_only_hooks.append(input_hook)
 
-        return train_step
+        return train_op
 
     def run(self, steps):
         hooks = [tf.train.StopAtStepHook(steps)]
         chief_only_hooks = []
 
+        strategy = LocalPSStrategy(self)
+
         with tf.variable_scope('Benchmark_Net'):
-            train_step = self.build_network(hooks, chief_only_hooks)
+            train_op = self.build_network(hooks, chief_only_hooks, strategy)
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(
             is_chief=True, checkpoint_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
             while not sess.should_stop():
-                sess.run(train_step)
-
-class DatasetInitializerHook(tf.train.SessionRunHook):
-    def __init__(self, iterator):
-        self._iterator = iterator
-
-    def begin(self):
-        self._initializer = self._iterator._initializer
-
-    def after_create_session(self, session, coord):
-        del coord
-        session.run(self._initializer)
+                sess.run(train_op)
 
 def run_benchmark():
 
