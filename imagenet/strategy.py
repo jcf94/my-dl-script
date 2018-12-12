@@ -6,7 +6,7 @@ class LocalPSStrategy(object):
         self._cpu_device = BenchMark.cpu_device
         self._num_gpus = BenchMark._num_gpus
         self._gpu_devices = BenchMark.gpu_devices
-        self._param_server_device = BenchMark.param_server_device
+        self._param_server_device = BenchMark._param_server_device
 
         self._global_variable = {}
         self._local_variable = [

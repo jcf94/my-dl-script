@@ -10,7 +10,7 @@ from strategy import LocalPSStrategy
 
 # ----- CPU / GPU Set
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
@@ -21,7 +21,7 @@ FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_integer('batch_size', 64,
                             """Batch size.""")
-tf.app.flags.DEFINE_integer('num_batches', 200,
+tf.app.flags.DEFINE_integer('num_batches', 100,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_string('data_format', 'NCHW',
                            """The data format for Convnet operations.
@@ -54,9 +54,7 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
 class BenchMark(object):
     def __init__(self):
         """ init """
-
         # -------------- Model Config --------------
-
         self._model = FLAGS.model
         self._data_format = FLAGS.data_format
 
@@ -70,7 +68,6 @@ class BenchMark(object):
         self._batch_size = FLAGS.batch_size
 
         # -------------- Device Config --------------
-
         self._num_gpus = FLAGS.num_gpus
 
         if FLAGS.job_name:
@@ -84,18 +81,11 @@ class BenchMark(object):
             for i in range(self._num_gpus)
         ]
         if FLAGS.local_parameter_device == 'gpu':
-            self.param_server_device = self.gpu_devices[0]
+            self._param_server_device = self.gpu_devices[0]
         else:
-            self.param_server_device = self.cpu_device
+            self._param_server_device = self.cpu_device
 
-        self.replica_devices = [
-            tf.train.replica_device_setter(
-                worker_device=d,
-                ps_device=self.param_server_device,
-                ps_tasks=1) for d in self.gpu_devices
-        ]
-
-        self._global_step_device = self.param_server_device
+        self._global_step_device = self._param_server_device
 
         def model_fn(features, labels):
 
@@ -129,15 +119,15 @@ class BenchMark(object):
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
                 ori_labels = tf.Variable(tf.ones([self._batch_size], dtype=tf.int64), trainable=False)
-                images = tf.data.Dataset.from_tensors(ori_images).repeat(100)
-                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(100)
+                images = tf.data.Dataset.from_tensors(ori_images).repeat(200)
+                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(200)
 
-                return tf.data.Dataset.zip((images, labels))
+                return tf.data.Dataset.zip((images, labels)).prefetch(1)
 
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
-    def build_network(self, hooks, chief_only_hooks, strategy):
+    def build_network(self, hooks, chief_only_hooks, strategy=None):
         with tf.device(self._global_step_device):
             global_step = tf.train.get_or_create_global_step()
     
@@ -150,7 +140,6 @@ class BenchMark(object):
             with tf.device(gpu), tf.variable_scope('Tower_%i' % index, custom_getter=strategy):
                 features, labels = input_data_iterator.get_next()
                 loss, batch_accuracy = self._model_fn(features, labels)
-
                 local_varis = strategy.get_local_variable(index)
                 gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                 gradients_list.append(gradients)
