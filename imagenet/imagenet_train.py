@@ -1,4 +1,6 @@
 import tensorflow as tf
+from tensorflow.python.client import timeline
+
 from datetime import datetime
 import os
 import time
@@ -54,11 +56,12 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
 class TraceHook(tf.train.SessionRunHook):
     """Hook to perform Traces every N steps."""
 
-    def __init__(self, ckptdir, every_step=50, trace_level=tf.RunOptions.FULL_TRACE):
-        self._trace = every_step == 1
-        self.writer = tf.summary.FileWriter(ckptdir)
-        self.trace_level = trace_level
-        self.every_step = every_step
+    def __init__(self, trace_file, target_step=50, trace_level=tf.RunOptions.FULL_TRACE):
+        self._trace = target_step == 1
+        self._trace_file = trace_file
+        self._trace_level = trace_level
+        self._target_step = target_step
+        self._now_step = 1
 
     def begin(self):
         self._global_step_tensor = tf.train.get_global_step()
@@ -67,19 +70,22 @@ class TraceHook(tf.train.SessionRunHook):
 
     def before_run(self, run_context):
         if self._trace:
-            options = tf.RunOptions(trace_level=self.trace_level)
+            options = tf.RunOptions(trace_level=self._trace_level)
         else:
             options = None
-        return tf.train.SessionRunArgs(fetches=self._global_step_tensor,
-                                       options=options)
+        return tf.train.SessionRunArgs(fetches=[], options=options)
 
     def after_run(self, run_context, run_values):
-        global_step = run_values.results - 1
         if self._trace:
             self._trace = False
-            self.writer.add_run_metadata(run_values.run_metadata,
-                                         f'{global_step}', global_step)
-        if not (global_step + 1) % self.every_step:
+            fetched_timeline = timeline.Timeline(run_values.run_metadata.step_stats)
+            chrome_trace = fetched_timeline.generate_chrome_trace_format()
+            with open(self._trace_file, 'w') as f:
+                f.write(chrome_trace)
+            print('Chrome Trace File write in %s' % FLAGS.trace_file)
+
+        self._now_step += 1
+        if self._now_step == self._target_step:
             self._trace = True
 
 class BenchMark(object):
@@ -193,7 +199,7 @@ class BenchMark(object):
     def run(self, steps):
         hooks = [tf.train.StopAtStepHook(steps)]
         if FLAGS.trace_file:
-            hooks.append(TraceHook('train'))
+            hooks.append(TraceHook(FLAGS.trace_file))
         chief_only_hooks = []
 
         with tf.variable_scope('Benchmark_Net'):
