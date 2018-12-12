@@ -51,6 +51,37 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
         del coord
         session.run(self._initializer)
 
+class TraceHook(tf.train.SessionRunHook):
+    """Hook to perform Traces every N steps."""
+
+    def __init__(self, ckptdir, every_step=50, trace_level=tf.RunOptions.FULL_TRACE):
+        self._trace = every_step == 1
+        self.writer = tf.summary.FileWriter(ckptdir)
+        self.trace_level = trace_level
+        self.every_step = every_step
+
+    def begin(self):
+        self._global_step_tensor = tf.train.get_global_step()
+        if self._global_step_tensor is None:
+            raise RuntimeError("Global step should be created to use _TraceHook.")
+
+    def before_run(self, run_context):
+        if self._trace:
+            options = tf.RunOptions(trace_level=self.trace_level)
+        else:
+            options = None
+        return tf.train.SessionRunArgs(fetches=self._global_step_tensor,
+                                       options=options)
+
+    def after_run(self, run_context, run_values):
+        global_step = run_values.results - 1
+        if self._trace:
+            self._trace = False
+            self.writer.add_run_metadata(run_values.run_metadata,
+                                         f'{global_step}', global_step)
+        if not (global_step + 1) % self.every_step:
+            self._trace = True
+
 class BenchMark(object):
     def __init__(self):
         """ init """
@@ -128,9 +159,12 @@ class BenchMark(object):
         self._input_fn = fake_input_fn
 
     def build_network(self, hooks, chief_only_hooks, strategy=None):
+        if (not strategy):
+            strategy = LocalPSStrategy(self)
+
         with tf.device(self._global_step_device):
             global_step = tf.train.get_or_create_global_step()
-    
+
         with tf.device(self.cpu_device):
             input_data_iterator = self._input_fn().make_initializable_iterator('Input Data')
 
@@ -158,12 +192,12 @@ class BenchMark(object):
 
     def run(self, steps):
         hooks = [tf.train.StopAtStepHook(steps)]
+        if FLAGS.trace_file:
+            hooks.append(TraceHook('train'))
         chief_only_hooks = []
 
-        strategy = LocalPSStrategy(self)
-
         with tf.variable_scope('Benchmark_Net'):
-            train_op = self.build_network(hooks, chief_only_hooks, strategy)
+            train_op = self.build_network(hooks, chief_only_hooks)
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(
