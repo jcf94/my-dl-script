@@ -10,6 +10,11 @@ from model.resnet import ResNet
 from model.inception import Inception
 from strategy import LocalPSStrategy, LocalStagingStrategy
 
+# PID = os.getpid()
+# print('Program pid:', PID)
+# print('Pause here to enter DBG')
+# os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
+
 # ----- CPU / GPU Set
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
@@ -21,7 +26,7 @@ CONFIG.gpu_options.allow_growth=True
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_integer('batch_size', 64,
+tf.app.flags.DEFINE_integer('batch_size', 32,
                             """Batch size.""")
 tf.app.flags.DEFINE_integer('num_batches', 100,
                             """Number of batches to run.""")
@@ -114,7 +119,7 @@ class BenchMark(object):
         
         self.cpu_device = '%s/cpu:0' % self.worker_prefix
         self.gpu_devices = [
-            '%s/%s:%i' % (self.worker_prefix, 'gpu', i)
+            '%s/%s:%i' % (self.worker_prefix, 'device:GPU', i)
             for i in range(self._num_gpus)
         ]
         if FLAGS.local_parameter_device == 'gpu':
@@ -159,7 +164,7 @@ class BenchMark(object):
                 images = tf.data.Dataset.from_tensors(ori_images).repeat(300)
                 labels = tf.data.Dataset.from_tensors(ori_labels).repeat(300)
 
-                return tf.data.Dataset.zip((images, labels)).prefetch(1)
+                return tf.data.Dataset.zip((images, labels))#.prefetch(1)
 
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
@@ -181,6 +186,7 @@ class BenchMark(object):
                 features, labels = input_data_iterator.get_next()
                 loss, batch_accuracy = self._model_fn(features, labels)
                 local_varis = strategy.get_local_variable(index)
+                # print(local_varis)
                 gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                 gradients_list.append(gradients)
 
@@ -209,8 +215,11 @@ class BenchMark(object):
         with tf.train.MonitoredTrainingSession(
             is_chief=True, checkpoint_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
+            print('Stage 0')
             sess.run(enqueue_op)
+            print('Stage 1')
             sess.run([enqueue_op, gradient_op])
+            print('Stage 2')
             while not sess.should_stop():
                 sess.run([train_op, enqueue_op, gradient_op])
 
