@@ -8,11 +8,11 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy
+from strategy import LocalPSStrategy, LocalStagingStrategy
 
 # ----- CPU / GPU Set
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 CONFIG = tf.ConfigProto()
 CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
@@ -156,8 +156,8 @@ class BenchMark(object):
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
                 ori_labels = tf.Variable(tf.ones([self._batch_size], dtype=tf.int64), trainable=False)
-                images = tf.data.Dataset.from_tensors(ori_images).repeat(200)
-                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(200)
+                images = tf.data.Dataset.from_tensors(ori_images).repeat(300)
+                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(300)
 
                 return tf.data.Dataset.zip((images, labels)).prefetch(1)
 
@@ -184,7 +184,7 @@ class BenchMark(object):
                 gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                 gradients_list.append(gradients)
 
-        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
+        train_op, enqueue_op, gradient_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
 
         # -------------- Run Hooks --------------
         logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy,
@@ -194,7 +194,7 @@ class BenchMark(object):
         input_hook = DatasetInitializerHook(input_data_iterator)
         chief_only_hooks.append(input_hook)
 
-        return train_op
+        return train_op, enqueue_op, gradient_op
 
     def run(self, steps):
         hooks = [tf.train.StopAtStepHook(steps)]
@@ -203,14 +203,16 @@ class BenchMark(object):
         chief_only_hooks = []
 
         with tf.variable_scope('Benchmark_Net'):
-            train_op = self.build_network(hooks, chief_only_hooks)
+            train_op, enqueue_op, gradient_op = self.build_network(hooks, chief_only_hooks, LocalStagingStrategy(self))
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(
             is_chief=True, checkpoint_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
+            sess.run(enqueue_op)
+            sess.run([enqueue_op, gradient_op])
             while not sess.should_stop():
-                sess.run(train_op)
+                sess.run([train_op, enqueue_op, gradient_op])
 
 def run_benchmark():
 
