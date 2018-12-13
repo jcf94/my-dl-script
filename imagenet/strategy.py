@@ -48,16 +48,16 @@ class LocalPSStrategy(object):
         with tf.name_scope('Gradient_Update'):
             global_varis = self.get_global_variable()
             if self._num_gpus > 1:
+                apply_list = []
                 for g_v in zip(*gradients_list, global_varis):
                     grads = g_v[:self._num_gpus]
                     varis = g_v[self._num_gpus]
-                    apply_list = []
                     with tf.device(varis.device):
                         average_grad = tf.multiply(tf.add_n(grads), 1.0 / self._num_gpus)
                         apply = optimizer.apply_gradients([(average_grad, varis)])
                         apply_list.append(apply)
-                    with tf.device(global_step.device):
-                        apply_list.append(global_step.assign_add(1))
+                with tf.device(global_step.device):
+                    apply_list.append(global_step.assign_add(1))
                 train_op = tf.group(apply_list)
             else:
                 grads_and_varis = list(zip(gradients_list[0], global_varis))

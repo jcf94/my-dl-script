@@ -73,7 +73,7 @@ class TraceHook(tf.train.SessionRunHook):
             options = tf.RunOptions(trace_level=self._trace_level)
         else:
             options = None
-        return tf.train.SessionRunArgs(fetches=[], options=options)
+        return tf.train.SessionRunArgs(fetches=[self._global_step_tensor], options=options)
 
     def after_run(self, run_context, run_values):
         if self._trace:
