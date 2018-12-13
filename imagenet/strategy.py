@@ -105,11 +105,9 @@ class LocalStagingStrategy(object):
                 self._local_sizes[min_size_device] += global_var.get_shape().num_elements()
             self._global_variable[name_without_tower] = global_var
 
-        with tf.name_scope('Benchmark_Net/Input_Staing/Staging'):
-            staging_var = data_flow_ops.StagingArea([dtype], [shape])
-            put_op = staging_var.put([tf.identity(global_var)])
-            get_op = staging_var.get()[0]
-
+        staging_var = data_flow_ops.StagingArea([dtype], [shape])
+        put_op = staging_var.put([tf.identity(global_var)])
+        get_op = staging_var.get()[0]
         self._staging_put_ops.append(put_op)
         self._local_variable[device_index][name_without_tower] = get_op
 
@@ -122,7 +120,9 @@ class LocalStagingStrategy(object):
         return [v for k,v in self._global_variable.items()]
     
     def compute_gradient_and_apply(self, gradients_list, global_step):
+
         optimizer = tf.train.GradientDescentOptimizer(0.001)
+        print(self._staging_put_ops.__len__())
         enqueue_op = tf.group(self._staging_put_ops)
 
         gradients_put_op = []
@@ -131,10 +131,11 @@ class LocalStagingStrategy(object):
         ]
         for index, gradients in enumerate(gradients_list):
             with tf.device(self._gpu_devices[index]):
-                for grad in gradients:
-                    staging_var = data_flow_ops.StagingArea([grad.dtype], [grad.shape])
-                    gradients_put_op.append(staging_var.put([grad]))
-                    gradients_get_op[index].append(staging_var.get()[0])
+                dtypes = [g.dtype for g in gradients]
+                shapes = [g.shape for g in gradients]
+                staging_var = data_flow_ops.StagingArea(dtypes, shapes)
+                gradients_put_op.append(staging_var.put(gradients))
+                gradients_get_op[index] = staging_var.get()
 
         with tf.name_scope('Gradient_Update'):
             global_varis = self.get_global_variable()
