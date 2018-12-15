@@ -61,12 +61,12 @@ class LocalPSStrategy(object):
                         apply_list.append(apply)
                 with tf.device(global_step.device):
                     apply_list.append(global_step.assign_add(1))
-                train_op = tf.group(apply_list)
+                apply_op = tf.group(apply_list)
             else:
                 grads_and_varis = list(zip(gradients_list[0], global_varis))
-                train_op = optimizer.apply_gradients(grads_and_varis, global_step)
+                apply_op = optimizer.apply_gradients(grads_and_varis, global_step)
 
-        return train_op, [], []
+        return [apply_op]
 
 class LocalStagingStrategy(object):
     def __init__(self, BenchMark):
@@ -123,7 +123,7 @@ class LocalStagingStrategy(object):
     def compute_gradient_and_apply(self, gradients_list, global_step):
 
         optimizer = tf.train.GradientDescentOptimizer(0.001)
-        enqueue_op = tf.group(self._staging_put_ops)
+        input_staging_op = tf.group(self._staging_put_ops)
 
         gradients_put_op = []
         gradients_get_op = [
@@ -150,9 +150,9 @@ class LocalStagingStrategy(object):
                         apply_list.append(apply)
                 with tf.device(global_step.device):
                     apply_list.append(global_step.assign_add(1))
-                train_op = tf.group(apply_list)
+                apply_op = tf.group(apply_list)
             else:
                 grads_and_varis = list(zip(gradients_get_op[0], global_varis))
-                train_op = optimizer.apply_gradients(grads_and_varis, global_step)
+                apply_op = optimizer.apply_gradients(grads_and_varis, global_step)
 
-        return train_op, enqueue_op, gradients_put_op
+        return [input_staging_op, gradients_put_op, apply_op]

@@ -46,6 +46,8 @@ tf.app.flags.DEFINE_string('model', "vgg11",
                             """""")
 tf.app.flags.DEFINE_string('trace_file', None,
                             """""")
+tf.app.flags.DEFINE_string('strategy', None,
+                            """ - Staging""")
 
 class DatasetInitializerHook(tf.train.SessionRunHook):
     def __init__(self, iterator):
@@ -169,9 +171,7 @@ class BenchMark(object):
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
 
-    def build_network(self, hooks, chief_only_hooks, strategy=None):
-        if (not strategy):
-            strategy = LocalPSStrategy(self)
+    def build_network(self, hooks, chief_only_hooks, strategy):
 
         with tf.device(self._global_step_device):
             global_step = tf.train.get_or_create_global_step()
@@ -190,7 +190,7 @@ class BenchMark(object):
                 gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                 gradients_list.append(gradients)
 
-        train_op, enqueue_op, gradient_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
+        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
 
         # -------------- Run Hooks --------------
         logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy,
@@ -200,7 +200,7 @@ class BenchMark(object):
         input_hook = DatasetInitializerHook(input_data_iterator)
         chief_only_hooks.append(input_hook)
 
-        return train_op, enqueue_op, gradient_op
+        return train_op
 
     def run(self, steps):
         hooks = [tf.train.StopAtStepHook(steps)]
@@ -208,19 +208,26 @@ class BenchMark(object):
             hooks.append(TraceHook(FLAGS.trace_file))
         chief_only_hooks = []
 
+        if FLAGS.strategy == 'Staging':
+            strategy = LocalStagingStrategy(self)
+        else:
+            strategy = LocalPSStrategy(self)
+
         with tf.variable_scope('Benchmark_Net'):
-            train_op, enqueue_op, gradient_op = self.build_network(hooks, chief_only_hooks, LocalStagingStrategy(self))
+            train_op = self.build_network(hooks, chief_only_hooks, strategy)
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(
             is_chief=True, checkpoint_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
             # -------------- Warmup & Pre Load Stage --------------
-            sess.run_step_fn(lambda step_context: step_context.session.run(enqueue_op))
-            sess.run_step_fn(lambda step_context: step_context.session.run([gradient_op, enqueue_op]))
+            if train_op.__len__() > 1:
+                for i in range(len(train_op)-1):
+                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i+1]))
+                print("Staging Pre Load")
 
             while not sess.should_stop():
-                sess.run([train_op, enqueue_op, gradient_op])
+                sess.run(train_op)
 
 def run_benchmark():
 
