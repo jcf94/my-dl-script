@@ -19,7 +19,7 @@ from strategy import LocalPSStrategy, LocalStagingStrategy
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 CONFIG = tf.ConfigProto()
-CONFIG.gpu_options.allow_growth=True
+#CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
 
 # -----
@@ -164,7 +164,7 @@ class BenchMark(object):
                 images = tf.data.Dataset.from_tensors(ori_images).repeat(300)
                 labels = tf.data.Dataset.from_tensors(ori_labels).repeat(300)
 
-                return tf.data.Dataset.zip((images, labels))#.prefetch(1)
+                return tf.data.Dataset.zip((images, labels)).prefetch(1)
 
         self._model_fn = model_fn
         self._input_fn = fake_input_fn
@@ -215,11 +215,10 @@ class BenchMark(object):
         with tf.train.MonitoredTrainingSession(
             is_chief=True, checkpoint_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
-            print('Stage 0')
-            sess.run(enqueue_op)
-            print('Stage 1')
-            sess.run([enqueue_op, gradient_op])
-            print('Stage 2')
+            # -------------- Warmup & Pre Load Stage --------------
+            sess.run_step_fn(lambda step_context: step_context.session.run(enqueue_op))
+            sess.run_step_fn(lambda step_context: step_context.session.run([gradient_op, enqueue_op]))
+
             while not sess.should_stop():
                 sess.run([train_op, enqueue_op, gradient_op])
 
