@@ -26,7 +26,7 @@ CONFIG = tf.ConfigProto()
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_integer('batch_size', 32,
+tf.app.flags.DEFINE_integer('batch_size', 64,
                             """Batch size.""")
 tf.app.flags.DEFINE_integer('num_batches', 100,
                             """Number of batches to run.""")
@@ -163,8 +163,8 @@ class BenchMark(object):
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
                 ori_labels = tf.Variable(tf.ones([self._batch_size], dtype=tf.int64), trainable=False)
-                images = tf.data.Dataset.from_tensors(ori_images).repeat(300)
-                labels = tf.data.Dataset.from_tensors(ori_labels).repeat(300)
+                images = tf.data.Dataset.from_tensors(ori_images).repeat()
+                labels = tf.data.Dataset.from_tensors(ori_labels).repeat()
 
                 return tf.data.Dataset.zip((images, labels)).prefetch(1)
 
