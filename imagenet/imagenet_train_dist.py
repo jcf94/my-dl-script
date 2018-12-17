@@ -8,7 +8,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy, LocalStagingStrategy, DistributedPSStrategy
+from strategy import LocalPSStrategy, LocalPSStagingStrategy, DistributedPSStrategy, DistributedPSStagingStrategy
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -92,7 +92,7 @@ def create_done_queue(i):
     all workers enqueue an item onto it to signal doneness."""
     
     with tf.device("/job:worker/replica:0/task:%d" % (i)):
-        return tf.FIFOQueue(1, tf.int32, shared_name="done_queue"+
+        return tf.FIFOQueue(1, tf.int32, shared_name="done_queue_"+
                             str(i))
 
 def create_done_queues(n):
@@ -240,10 +240,13 @@ class BenchMark(object):
                 print('Worker %i Ready to Close' % FLAGS.task_index)
                 return
 
-            strategy = DistributedPSStrategy(self)
+            if FLAGS.strategy == 'staging':
+                strategy = DistributedPSStagingStrategy(self)
+            else:
+                strategy = DistributedPSStrategy(self)
         else:
             if FLAGS.strategy == 'staging':
-                strategy = LocalStagingStrategy(self)
+                strategy = LocalPSStagingStrategy(self)
             else:
                 strategy = LocalPSStrategy(self)
             server = None

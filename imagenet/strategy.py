@@ -68,13 +68,13 @@ class LocalPSStrategy(object):
 
         return [apply_op]
 
-class LocalStagingStrategy(object):
+class LocalPSStagingStrategy(object):
     def __init__(self, BenchMark):
-        tf.logging.info('Using LocalStagingStrategy')
+        tf.logging.info('Using LocalPSStagingStrategy')
 
         self._cpu_device = BenchMark.cpu_device
-        self._num_gpus = BenchMark._num_gpus
         self._gpu_devices = BenchMark.gpu_devices
+        self._num_gpus = BenchMark._num_gpus
         self._param_server_device = BenchMark._param_server_device
 
         self._global_variable = {}
@@ -121,7 +121,6 @@ class LocalStagingStrategy(object):
         return [v for k,v in self._global_variable.items()]
     
     def compute_gradient_and_apply(self, gradients_list, global_step):
-
         optimizer = tf.train.GradientDescentOptimizer(0.001)
         input_staging_op = tf.group(self._staging_put_ops)
 
@@ -159,7 +158,7 @@ class LocalStagingStrategy(object):
 
 class DistributedPSStrategy(object):
     def __init__(self, BenchMark):
-        tf.logging.info('Using LocalPSStrategy')
+        tf.logging.info('Using DistributedPSStrategy')
 
         self._cpu_device = BenchMark.cpu_device
         self._num_workers = BenchMark._num_workers
@@ -208,12 +207,116 @@ class DistributedPSStrategy(object):
             for g_v in zip(*gradients_list, global_varis):
                 grads = g_v[:self._total_gpus]
                 varis = g_v[self._total_gpus]
+
+                grad_sum_list = []
+                for i in range(self._num_workers):
+                    grads_in_worker = grads[i*self._num_gpus:(i+1)*self._num_gpus]
+                    with tf.device(self._cpu_device[i]):
+                        grad_sum_in_worker = tf.add_n(grads_in_worker)
+                        grad_sum_list.append(grad_sum_in_worker)
+
                 with tf.device(varis.device):
-                    average_grad = tf.multiply(tf.add_n(grads), 1.0 / self._total_gpus)
+                    average_grad = tf.multiply(tf.add_n(grad_sum_list), 1.0 / self._total_gpus)
                     apply = optimizer.apply_gradients([(average_grad, varis)])
                     apply_list.append(apply)
+
             with tf.device(global_step.device):
                 apply_list.append(global_step.assign_add(1))
             apply_op = tf.group(apply_list)
 
         return [apply_op]
+
+class DistributedPSStagingStrategy(object):
+    def __init__(self, BenchMark):
+        tf.logging.info('Using DistributedPSStagingStrategy')
+
+        self._cpu_device = BenchMark.cpu_device
+        self._gpu_devices = BenchMark.gpu_devices
+        self._num_workers = BenchMark._num_workers
+        self._num_gpus = BenchMark._num_gpus
+        self._total_gpus = self._num_workers * self._num_gpus
+        self._param_server_device = BenchMark._param_server_device
+
+        self._global_variable = {}
+        self._local_variable = [
+            [dict() for _ in range(self._num_gpus)] for _ in range(self._num_workers)
+        ]
+        self._staging_put_ops = []
+        self._local_sizes = [0] * self._num_workers
+
+    def __call__(self, getter, name, *args, **kwargs):
+        name_split = name.split('/', 2)
+        worker_index = int(name_split[1].split('_')[1])
+        gpu_index = int(name_split[1].split('_')[2])
+        name_without_tower = name_split[0] + '/' + name_split[2]
+
+        shape = kwargs['shape']
+        dtype = kwargs['dtype']
+
+        if (name_without_tower in self._global_variable):
+            global_var = self._global_variable[name_without_tower]
+        else:
+            min_size_device, _ = min(enumerate(self._local_sizes), key=operator.itemgetter(1))
+            with tf.device(self._cpu_device[min_size_device]):
+                global_var = getter(name_without_tower, *args, **kwargs)
+            self._local_sizes[min_size_device] += global_var.get_shape().num_elements()
+            self._global_variable[name_without_tower] = global_var
+
+        with tf.name_scope("Benchmark_Net/Input_Staging/Staging"):
+            staging_var = data_flow_ops.StagingArea([dtype], [shape])
+            put_op = staging_var.put(tf.identity(global_var))
+            get_op = staging_var.get()[0]
+            self._staging_put_ops.append(put_op)
+            self._local_variable[worker_index][gpu_index][name_without_tower] = get_op
+
+        return self._local_variable[worker_index][gpu_index][name_without_tower]
+
+    def get_local_variable(self, worker_index, gpu_index):
+        return [v for k,v in self._local_variable[worker_index][gpu_index].items()]
+    
+    def get_global_variable(self):
+        return [v for k,v in self._global_variable.items()]
+    
+    def compute_gradient_and_apply(self, gradients_list, global_step):
+        optimizer = tf.train.GradientDescentOptimizer(0.001)
+        input_staging_op = tf.group(self._staging_put_ops)
+
+        gradients_put_op = []
+        gradients_get_op = [
+            list() for _ in range(self._total_gpus)
+        ]
+        for index, gradients in enumerate(gradients_list):
+            worker_index = (int)(index / self._num_gpus)
+            gpu_index = index % self._num_gpus
+            with tf.device(self._gpu_devices[worker_index][gpu_index]), tf.name_scope("Gradient_Staging/Staging"):
+                dtypes = [g.dtype for g in gradients]
+                shapes = [g.shape for g in gradients]
+                staging_var = data_flow_ops.StagingArea(dtypes, shapes)
+                gradients_put_op.append(staging_var.put(gradients))
+                gradients_get_op[index] = staging_var.get()
+
+        with tf.name_scope('Gradient_Update'):
+            global_varis = self.get_global_variable()
+
+            apply_list = []
+            for g_v in zip(*gradients_get_op, global_varis):
+                grads = g_v[:self._total_gpus]
+                varis = g_v[self._total_gpus]
+
+                grad_sum_list = []
+                for i in range(self._num_workers):
+                    grads_in_worker = grads[i*self._num_gpus:(i+1)*self._num_gpus]
+                    with tf.device(self._cpu_device[i]):
+                        grad_sum_in_worker = tf.add_n(grads_in_worker)
+                        grad_sum_list.append(grad_sum_in_worker)
+
+                with tf.device(varis.device):
+                    average_grad = tf.multiply(tf.add_n(grad_sum_list), 1.0 / self._total_gpus)
+                    apply = optimizer.apply_gradients([(average_grad, varis)])
+                    apply_list.append(apply)
+
+            with tf.device(global_step.device):
+                apply_list.append(global_step.assign_add(1))
+            apply_op = tf.group(apply_list)
+
+        return [input_staging_op, gradients_put_op, apply_op]
