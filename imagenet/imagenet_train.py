@@ -8,7 +8,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy, LocalStagingStrategy
+from strategy import LocalPSStrategy, LocalPSStagingStrategy, DistributedPSStrategy, DistributedPSStagingStrategy
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -16,38 +16,29 @@ from strategy import LocalPSStrategy, LocalStagingStrategy
 # os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
 
 # ----- CPU / GPU Set
-
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 CONFIG = tf.ConfigProto()
 #CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
 
 # -----
-
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_integer('batch_size', 64,
-                            """Batch size.""")
-tf.app.flags.DEFINE_integer('num_batches', 100,
-                            """Number of batches to run.""")
+tf.app.flags.DEFINE_integer('batch_size', 128, """Batch size.""")
+tf.app.flags.DEFINE_integer('num_batches', 100, """Number of batches to run.""")
+tf.app.flags.DEFINE_integer('num_gpus', 2, """""")
+tf.app.flags.DEFINE_string('model', "vgg19", """""")
 tf.app.flags.DEFINE_string('data_format', 'NCHW',
                            """The data format for Convnet operations.
                            Can be either NHWC or NCHW.
                            """)
-tf.app.flags.DEFINE_string('local_parameter_device', 'cpu',
-                            """""")
-tf.app.flags.DEFINE_string('job_name', None,
-                            """""")
-tf.app.flags.DEFINE_integer('task_index', 0,
-                            """""")
-tf.app.flags.DEFINE_integer('num_gpus', 2,
-                            """""")
-tf.app.flags.DEFINE_string('model', "vgg11",
-                            """""")
-tf.app.flags.DEFINE_string('trace_file', None,
-                            """""")
-tf.app.flags.DEFINE_string('strategy', None,
-                            """ - Staging""")
+tf.app.flags.DEFINE_string('local_parameter_device', 'cpu', """""")
+tf.app.flags.DEFINE_string('trace_file', None, """""")
+tf.app.flags.DEFINE_string('strategy', None, """ - staging""")
+
+tf.app.flags.DEFINE_string('worker_hosts', None, 'Comma-separated list of target hosts')
+tf.app.flags.DEFINE_string('job_name', None, """""")
+tf.app.flags.DEFINE_integer('task_index', 0, """""")
 
 class DatasetInitializerHook(tf.train.SessionRunHook):
     def __init__(self, iterator):
@@ -95,6 +86,31 @@ class TraceHook(tf.train.SessionRunHook):
         if self._now_step == self._target_step:
             self._trace = True
 
+def create_done_queue(i):
+    """Queue used to signal death for i'th ps shard. Intended to have 
+    all workers enqueue an item onto it to signal doneness."""
+    
+    with tf.device("/job:worker/replica:0/task:%d" % (i)):
+        return tf.FIFOQueue(1, tf.int32, shared_name="done_queue_"+
+                            str(i))
+
+def create_done_queues(n):
+    return [create_done_queue(i) for i in range(1, n)]
+
+class DistributedEndHook(tf.train.SessionRunHook):
+    def __init__(self, num_workers):
+        self._num_workers = num_workers
+    
+    def begin(self):
+        self._done_queue = [q.enqueue(1) for q in create_done_queues(self._num_workers)]
+
+    def end(self, session):
+        i = 0
+        for op in self._done_queue:
+            session.run(op)
+            i = i+1
+            print('Worker %i Closed' % i)
+
 class BenchMark(object):
     def __init__(self):
         """ init """
@@ -115,21 +131,33 @@ class BenchMark(object):
         self._num_gpus = FLAGS.num_gpus
 
         if FLAGS.job_name:
-            self.worker_prefix = '/job:worker/task:%s' % FLAGS.task_index
-        else:
-            self.worker_prefix = ''
-        
-        self.cpu_device = '%s/cpu:0' % self.worker_prefix
-        self.gpu_devices = [
-            '%s/%s:%i' % (self.worker_prefix, 'device:GPU', i)
-            for i in range(self._num_gpus)
-        ]
-        if FLAGS.local_parameter_device == 'gpu':
-            self._param_server_device = self.gpu_devices[0]
-        else:
-            self._param_server_device = self.cpu_device
+            self._worker_hosts = FLAGS.worker_hosts.split(",")
+            self._num_workers = self._worker_hosts.__len__()
+            self._worker_prefix = ['/job:worker/replica:0/task:%s' % i for i in range(self._num_workers)]
 
-        self._global_step_device = self._param_server_device
+            self.cpu_device = ['%s/cpu:0' % prefix for prefix in self._worker_prefix]
+            self.gpu_devices = [
+                ['%s/%s:%i' % (prefix, 'device:GPU', i)
+                for i in range(self._num_gpus)]
+                for prefix in self._worker_prefix
+            ]
+
+            self._param_server_device = self.cpu_device
+            self._global_step_device = self._param_server_device[0]
+
+        else:
+            self._worker_prefix = None
+            self.cpu_device = '/device:CPU:0'
+            self.gpu_devices = [
+                '/device:GPU:%i' % i
+                for i in range(self._num_gpus)
+            ]
+
+            if FLAGS.local_parameter_device == 'gpu':
+                self._param_server_device = self.gpu_devices[0]
+            else:
+                self._param_server_device = self.cpu_device
+            self._global_step_device = self._param_server_device
 
         def model_fn(features, labels):
 
@@ -158,7 +186,13 @@ class BenchMark(object):
                 image_shape = [self._batch_size, image_size, image_size, 3]
 
             # ----------------------- Fake Input Images -----------------------
-            with tf.device(self.cpu_device), tf.name_scope('Fake_Input_Images'):
+
+            if self._worker_prefix:
+                image_device = self.cpu_device[0]
+            else:
+                image_device = self.cpu_device
+
+            with tf.device(image_device), tf.name_scope('Fake_Input_Images'):
                 ori_images = tf.Variable(tf.random_normal(image_shape,
                                                         dtype=tf.float32,
                                                         stddev=1e-1), trainable=False)
@@ -176,19 +210,31 @@ class BenchMark(object):
         with tf.device(self._global_step_device):
             global_step = tf.train.get_or_create_global_step()
 
-        with tf.device(self.cpu_device):
-            input_data_iterator = self._input_fn().make_initializable_iterator('Input Data')
-
-        # -------------- Network Model --------------
         gradients_list = []
-        for index, gpu in enumerate(self.gpu_devices):
-            with tf.device(gpu), tf.variable_scope('Tower_%i' % index, custom_getter=strategy):
-                features, labels = input_data_iterator.get_next()
-                loss, batch_accuracy = self._model_fn(features, labels)
-                local_varis = strategy.get_local_variable(index)
-                # print(local_varis)
-                gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
-                gradients_list.append(gradients)
+        if self._worker_prefix:
+            with tf.device(self.cpu_device[0]):
+                input_data_iterator = self._input_fn().make_initializable_iterator('Input Data')
+            # -------------- Network Model --------------
+            for worker_index, gpu_in_worker in enumerate(self.gpu_devices):
+                for gpu_index, gpu in enumerate(gpu_in_worker):
+                    with tf.device(gpu), tf.variable_scope('Tower_%i_%i' % (worker_index, gpu_index), custom_getter=strategy):
+                        features, labels = input_data_iterator.get_next()
+                        loss, batch_accuracy = self._model_fn(features, labels)
+                        local_varis = strategy.get_local_variable(worker_index, gpu_index)
+                        gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
+                        gradients_list.append(gradients)
+        else:
+            with tf.device(self.cpu_device):
+                input_data_iterator = self._input_fn().make_initializable_iterator('Input Data')
+            # -------------- Network Model --------------
+            for index, gpu in enumerate(self.gpu_devices):
+                with tf.device(gpu), tf.variable_scope('Tower_%i' % index, custom_getter=strategy):
+                    features, labels = input_data_iterator.get_next()
+                    loss, batch_accuracy = self._model_fn(features, labels)
+                    local_varis = strategy.get_local_variable(index)
+                    # print(local_varis)
+                    gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
+                    gradients_list.append(gradients)
 
         train_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
 
@@ -203,27 +249,54 @@ class BenchMark(object):
         return train_op
 
     def run(self, steps):
+        if self._worker_prefix:
+            [DistributedEndHook(self._num_workers)]
+        else:
+            chief_only_hooks = []
+
         hooks = [tf.train.StopAtStepHook(steps)]
         if FLAGS.trace_file:
             hooks.append(TraceHook(FLAGS.trace_file))
-        chief_only_hooks = []
 
-        if FLAGS.strategy == 'Staging':
-            strategy = LocalStagingStrategy(self)
+        if self._worker_prefix:
+            cluster = tf.train.ClusterSpec({"worker": self._worker_hosts})
+
+            server = tf.train.Server(cluster,
+                        job_name=FLAGS.job_name,
+                        task_index=FLAGS.task_index,
+                        protocol="grpc+verbs")
+            
+            if FLAGS.task_index:
+                with tf.Session(server.target) as sess:
+                    sess.run(create_done_queue(FLAGS.task_index).dequeue())
+                print('Worker %i Ready to Close' % FLAGS.task_index)
+                return
+
+            if FLAGS.strategy == 'staging':
+                strategy = DistributedPSStagingStrategy(self)
+            else:
+                strategy = DistributedPSStrategy(self)
+            
+            target = server.target
         else:
-            strategy = LocalPSStrategy(self)
+            if FLAGS.strategy == 'staging':
+                strategy = LocalPSStagingStrategy(self)
+            else:
+                strategy = LocalPSStrategy(self)
+            
+            target = None
 
         with tf.variable_scope('Benchmark_Net'):
             train_op = self.build_network(hooks, chief_only_hooks, strategy)
 
         # -------------- Session Run --------------
-        with tf.train.MonitoredTrainingSession(
-            is_chief=True, checkpoint_dir='train', config=CONFIG,
+        with tf.train.MonitoredTrainingSession(target,
+            is_chief=True, summary_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
             # -------------- Warmup & Pre Load Stage --------------
             if train_op.__len__() > 1:
-                for i in range(len(train_op)-1):
-                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i+1]))
+                for i in range(len(train_op)):
+                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i]))
                 print("Staging Pre Load")
 
             while not sess.should_stop():
