@@ -8,7 +8,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy, DistributedPSStrategy, DistributedPSStagingStrategy, LocalAllreduceStrategy
+from strategy import LocalPSStrategy, DistributedPSStrategy, LocalAllreduceStrategy
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -41,7 +41,6 @@ tf.app.flags.DEFINE_string('strategy', 'ps',
 tf.app.flags.DEFINE_boolean('staged_vars', False, """""")
 
 tf.app.flags.DEFINE_string('worker_hosts', None, 'Comma-separated list of target hosts')
-tf.app.flags.DEFINE_string('job_name', None, """""")
 tf.app.flags.DEFINE_integer('task_index', 0, """""")
 
 class DatasetInitializerHook(tf.train.SessionRunHook):
@@ -134,7 +133,7 @@ class BenchMark(object):
         # -------------- Device Config --------------
         self._num_gpus = FLAGS.num_gpus
 
-        if FLAGS.job_name:
+        if FLAGS.worker_hosts:
             self._worker_hosts = FLAGS.worker_hosts.split(",")
             self._num_workers = self._worker_hosts.__len__()
             self._worker_prefix = ['/job:worker/replica:0/task:%s' % i for i in range(self._num_workers)]
@@ -150,10 +149,7 @@ class BenchMark(object):
             self._global_step_device = self._param_server_device[0]
 
             if FLAGS.strategy == 'ps':
-                if FLAGS.staged_vars:
-                    self._strategy = DistributedPSStagingStrategy(self)
-                else:
-                    self._strategy = DistributedPSStrategy(self)
+                self._strategy = DistributedPSStrategy(self, FLAGS.staged_vars)
             else:
                 tf.logging.error("Strategy not found.")
                 return
@@ -282,7 +278,7 @@ class BenchMark(object):
             cluster = tf.train.ClusterSpec({"worker": self._worker_hosts})
 
             server = tf.train.Server(cluster,
-                        job_name=FLAGS.job_name,
+                        job_name='worker',
                         task_index=FLAGS.task_index,
                         protocol="grpc+verbs")
             
