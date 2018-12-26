@@ -8,7 +8,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy, LocalPSStagingStrategy, DistributedPSStrategy, DistributedPSStagingStrategy
+from strategy import LocalPSStrategy, DistributedPSStrategy, DistributedPSStagingStrategy, LocalAllreduceStrategy
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -24,17 +24,21 @@ CONFIG = tf.ConfigProto()
 # -----
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_integer('batch_size', 128, """Batch size.""")
+tf.app.flags.DEFINE_integer('batch_size', 64, """Batch size.""")
 tf.app.flags.DEFINE_integer('num_batches', 100, """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('num_gpus', 2, """""")
-tf.app.flags.DEFINE_string('model', "vgg19", """""")
+tf.app.flags.DEFINE_string('model', "vgg11", """""")
 tf.app.flags.DEFINE_string('data_format', 'NCHW',
                            """The data format for Convnet operations.
                            Can be either NHWC or NCHW.
                            """)
 tf.app.flags.DEFINE_string('local_parameter_device', 'cpu', """""")
 tf.app.flags.DEFINE_string('trace_file', None, """""")
-tf.app.flags.DEFINE_string('strategy', None, """ - staging""")
+tf.app.flags.DEFINE_string('strategy', 'ps',
+                            """ - ps
+                                - allreduce
+                            """)
+tf.app.flags.DEFINE_boolean('staged_vars', False, """""")
 
 tf.app.flags.DEFINE_string('worker_hosts', None, 'Comma-separated list of target hosts')
 tf.app.flags.DEFINE_string('job_name', None, """""")
@@ -145,6 +149,14 @@ class BenchMark(object):
             self._param_server_device = self.cpu_device
             self._global_step_device = self._param_server_device[0]
 
+            if FLAGS.strategy == 'ps':
+                if FLAGS.staged_vars:
+                    self._strategy = DistributedPSStagingStrategy(self)
+                else:
+                    self._strategy = DistributedPSStrategy(self)
+            else:
+                tf.logging.error("Strategy not found.")
+                return
         else:
             self._worker_prefix = None
             self.cpu_device = '/device:CPU:0'
@@ -158,6 +170,14 @@ class BenchMark(object):
             else:
                 self._param_server_device = self.cpu_device
             self._global_step_device = self._param_server_device
+
+            if FLAGS.strategy == 'ps':
+                self._strategy = LocalPSStrategy(self, FLAGS.staged_vars)
+            elif FLAGS.strategy == 'allreduce':
+                self._strategy = LocalAllreduceStrategy(self)
+            else:
+                tf.logging.error("Strategy not found.")
+                return
 
         def model_fn(features, labels):
 
@@ -250,7 +270,7 @@ class BenchMark(object):
 
     def run(self, steps):
         if self._worker_prefix:
-            [DistributedEndHook(self._num_workers)]
+            chief_only_hooks = [DistributedEndHook(self._num_workers)]
         else:
             chief_only_hooks = []
 
@@ -272,22 +292,12 @@ class BenchMark(object):
                 print('Worker %i Ready to Close' % FLAGS.task_index)
                 return
 
-            if FLAGS.strategy == 'staging':
-                strategy = DistributedPSStagingStrategy(self)
-            else:
-                strategy = DistributedPSStrategy(self)
-            
             target = server.target
         else:
-            if FLAGS.strategy == 'staging':
-                strategy = LocalPSStagingStrategy(self)
-            else:
-                strategy = LocalPSStrategy(self)
-            
             target = None
 
         with tf.variable_scope('Benchmark_Net'):
-            train_op = self.build_network(hooks, chief_only_hooks, strategy)
+            train_op = self.build_network(hooks, chief_only_hooks, self._strategy)
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(target,
@@ -304,9 +314,10 @@ class BenchMark(object):
 
 def run_benchmark():
 
+    tf.logging.set_verbosity(tf.logging.INFO)
+
     bench = BenchMark()
 
-    tf.logging.set_verbosity(tf.logging.INFO)
     bench.run(FLAGS.num_batches)
 
 def main(_):
