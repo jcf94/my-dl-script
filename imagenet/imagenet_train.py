@@ -8,7 +8,7 @@ import time
 from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
-from strategy import LocalPSStrategy, DistributedPSStrategy, LocalAllreduceStrategy
+from strategy import LocalPSStrategy, DistributedPSStrategy, LocalAllreduceStrategy, DistributedAllreduceStrategy
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -150,6 +150,8 @@ class BenchMark(object):
 
             if FLAGS.strategy == 'ps':
                 self._strategy = DistributedPSStrategy(self, FLAGS.staged_vars)
+            elif FLAGS.strategy == 'allreduce':
+                self._strategy = DistributedAllreduceStrategy(self)
             else:
                 tf.logging.error("Strategy not found.")
                 return
@@ -282,28 +284,32 @@ class BenchMark(object):
                         task_index=FLAGS.task_index,
                         protocol="grpc+verbs")
             
-            if FLAGS.task_index:
+            if FLAGS.task_index and FLAGS.strategy != "allreduce":
                 with tf.Session(server.target) as sess:
                     sess.run(create_done_queue(FLAGS.task_index).dequeue())
                 print('Worker %i Ready to Close' % FLAGS.task_index)
                 return
 
             target = server.target
+            is_chief = FLAGS.task_index == 0
         else:
             target = None
+            is_chief = True
 
         with tf.variable_scope('Benchmark_Net'):
             train_op = self.build_network(hooks, chief_only_hooks, self._strategy)
 
         # -------------- Session Run --------------
         with tf.train.MonitoredTrainingSession(target,
-            is_chief=True, summary_dir='train', config=CONFIG,
+            is_chief=is_chief, summary_dir='train', config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
             # -------------- Warmup & Pre Load Stage --------------
             if train_op.__len__() > 1:
                 for i in range(len(train_op)):
                     sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i]))
-                print("Staging Pre Load")
+                tf.logging.info('Staging Pre Load')
+
+            tf.logging.info('Training Start')
 
             while not sess.should_stop():
                 sess.run(train_op)
