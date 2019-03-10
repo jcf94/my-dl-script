@@ -55,8 +55,8 @@ set -e
 
 # Create the output and temporary directories.
 WORK_DIR=`pwd`
-DATA_DIR="${WORK_DIR}/record-data"
-SCRATCH_DIR="${WORK_DIR}/raw-data/"
+DATA_DIR="${WORK_DIR}/record_data"
+SCRATCH_DIR="${WORK_DIR}/raw_data/"
 
 mkdir -p "${DATA_DIR}"
 mkdir -p "${SCRATCH_DIR}"
