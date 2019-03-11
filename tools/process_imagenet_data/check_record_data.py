@@ -1,5 +1,6 @@
 import tensorflow as tf
 import os
+import record_data_read as rdread
 
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
@@ -22,96 +23,63 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 #     'image/encoded': _bytes_feature(image_buffer)
 # }
 
-def parse_example_proto(example_serialized):
-  """Parses an Example proto containing a training example of an image.
+def map_fn(example_serialized):
+    image_buffer, label_index, bbox, _ = rdread.parse_example_proto(example_serialized)
+    return rdread.simple_process(image_buffer, bbox, 299, 299, 3, True), label_index
+    # return ip.image_preprocessing(image_buffer, bbox, True, 0)
 
-  The output of the build_image_data.py image preprocessing script is a dataset
-  containing serialized Example protocol buffers. Each Example proto contains
-  the following fields:
+DATA_DIR = "record_data/"
+class ImageNet_Data(object):
+    def __init__(self, name, subset):
+        assert subset in self.available_subsets()
+        self.name = name
+        self.subset = subset
 
-    image/height: 462
-    image/width: 581
-    image/colorspace: 'RGB'
-    image/channels: 3
-    image/class/label: 615
-    image/class/synset: 'n03623198'
-    image/class/text: 'knee pad'
-    image/object/bbox/xmin: 0.1
-    image/object/bbox/xmax: 0.9
-    image/object/bbox/ymin: 0.2
-    image/object/bbox/ymax: 0.6
-    image/object/bbox/label: 615
-    image/format: 'JPEG'
-    image/filename: 'ILSVRC2012_val_00041207.JPEG'
-    image/encoded: <JPEG encoded string>
+    def available_subsets(self):
+        return ['train', 'validation']
 
-  Args:
-    example_serialized: scalar Tensor tf.string containing a serialized
-      Example protocol buffer.
+    def num_examples_per_epoch(self):
+        if self.subset == 'train':
+            return 1281167
+        elif self.subset == 'validation':
+            return 50000
 
-  Returns:
-    image_buffer: Tensor tf.string containing the contents of a JPEG file.
-    label: Tensor tf.int32 containing the label.
-    bbox: 3-D float Tensor of bounding boxes arranged [1, num_boxes, coords]
-      where each coordinate is [0, 1) and the coordinates are arranged as
-      [ymin, xmin, ymax, xmax].
-    text: Tensor tf.string containing the human-readable label.
-  """
-  # Dense features in Example proto.
-  feature_map = {
-      'image/encoded': tf.FixedLenFeature([], dtype=tf.string,
-                                          default_value=''),
-      'image/class/label': tf.FixedLenFeature([1], dtype=tf.int64,
-                                              default_value=-1),
-      'image/class/text': tf.FixedLenFeature([], dtype=tf.string,
-                                             default_value=''),
-      'image/height': tf.FixedLenFeature([1], dtype=tf.int64,
-                                              default_value=-1),
-      'image/width': tf.FixedLenFeature([1], dtype=tf.int64,
-                                              default_value=-1)
-  }
-  sparse_float32 = tf.VarLenFeature(dtype=tf.float32)
-  # Sparse features in Example proto.
-  feature_map.update(
-      {k: sparse_float32 for k in ['image/object/bbox/xmin',
-                                   'image/object/bbox/ymin',
-                                   'image/object/bbox/xmax',
-                                   'image/object/bbox/ymax']})
+    def dataset(self):
+        tf_record_pattern = os.path.join(DATA_DIR, '%s-*' % self.subset)
+        data_files = tf.gfile.Glob(tf_record_pattern)
 
-  features = tf.parse_single_example(example_serialized, feature_map)
-  label = tf.cast(features['image/class/label'], dtype=tf.int32)
+        if not data_files:
+            print("Error")
+            exit(-1)
 
-  xmin = tf.expand_dims(features['image/object/bbox/xmin'].values, 0)
-  ymin = tf.expand_dims(features['image/object/bbox/ymin'].values, 0)
-  xmax = tf.expand_dims(features['image/object/bbox/xmax'].values, 0)
-  ymax = tf.expand_dims(features['image/object/bbox/ymax'].values, 0)
+        dataset = tf.data.TFRecordDataset(data_files, buffer_size=10000, num_parallel_reads=4)
+        return dataset
 
-  # Note that we impose an ordering of (y, x) just to make life difficult.
-  bbox = tf.concat(axis=0, values=[ymin, xmin, ymax, xmax])
+data = ImageNet_Data('ImageNet', 'validation')
 
-  # Force the variable number of bounding boxes into the shape
-  # [1, num_boxes, coords].
-  bbox = tf.expand_dims(bbox, 0)
-  bbox = tf.transpose(bbox, [0, 2, 1])
+dataset = data.dataset()
 
-  return features['image/encoded'], label, features['image/class/text'], features['image/height'], features['image/width']
+# filename = ["record_data/train-00000-of-01024"]
+# dataset = tf.data.TFRecordDataset(filename)
+dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+dataset = dataset.shuffle(buffer_size=10000)
+dataset = dataset.batch(batch_size=64)
+dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+# dataset = dataset.repeat()
 
-filename = ["record-data/train-00000-of-01024"]
-dataset = tf.data.TFRecordDataset(filename)
-
-dataset = dataset.map(parse_example_proto)
 iterator = dataset.make_initializable_iterator()
 
 sess = tf.Session()
 
-sess.run(iterator.initializer)
-
 count = 0
 
-try:
+for i in range(5):
+    sess.run(iterator.initializer)
     while (True):
-        sess.run(iterator.get_next())
-        count += 1
-except tf.errors.OutOfRangeError:
-    print(count)
-    print("Done")
+        try:
+            sess.run(iterator.get_next())
+            count += 1
+            print(count)
+        except tf.errors.OutOfRangeError:
+            print("Done one epoch")
+            break;
