@@ -9,6 +9,7 @@ from model.vgg import Vgg
 from model.resnet import ResNet
 from model.inception import Inception
 from strategy import LocalPSStrategy, DistributedPSStrategy, LocalAllreduceStrategy, DistributedAllreduceStrategy
+import process_imagenet_data.record_data_read as rdread
 
 # PID = os.getpid()
 # print('Program pid:', PID)
@@ -25,15 +26,26 @@ CONFIG = tf.ConfigProto()
 FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_integer('batch_size', 64, """Batch size.""")
+tf.app.flags.DEFINE_integer('num_epochs', 60, """""")
 tf.app.flags.DEFINE_integer('num_batches', 100, """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('num_gpus', 2, """""")
-tf.app.flags.DEFINE_string('model', "vgg11", """""")
+tf.app.flags.DEFINE_string('model', 'resnet50', """""")
+tf.app.flags.DEFINE_string('optimizer', 'sgd',
+                            """ - sgd
+                                - momentum
+                            """)
+tf.app.flags.DEFINE_float('learning_rate', 0.1, """""")
 tf.app.flags.DEFINE_string('data_format', 'NCHW',
                            """The data format for Convnet operations.
                            Can be either NHWC or NCHW.
                            """)
 tf.app.flags.DEFINE_string('local_parameter_device', 'cpu', """""")
 tf.app.flags.DEFINE_string('trace_file', None, """""")
+tf.app.flags.DEFINE_string('work_mode', 'test',
+                            """ - test
+                                - train
+                                - validation
+                            """)
 tf.app.flags.DEFINE_string('strategy', 'ps',
                             """ - ps
                                 - allreduce
@@ -48,7 +60,7 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
         self._iterator = iterator
 
     def begin(self):
-        self._initializer = self._iterator._initializer
+        self._initializer = self._iterator.initializer
 
     def after_create_session(self, session, coord):
         del coord
@@ -114,6 +126,32 @@ class DistributedEndHook(tf.train.SessionRunHook):
             i = i+1
             print('Worker %i Closed' % i)
 
+DATA_DIR = "process_imagenet_data/record_data/"
+class ImageNet_Data(object):
+    def __init__(self, name, subset):
+        assert subset in self.available_subsets()
+        self.name = name
+        self.subset = subset
+
+    def available_subsets(self):
+        return ['train', 'validation']
+
+    def num_examples_per_epoch(self):
+        if self.subset == 'train':
+            return 1281167
+        elif self.subset == 'validation':
+            return 50000
+
+    def dataset(self):
+        tf_record_pattern = os.path.join(DATA_DIR, '%s-*' % self.subset)
+        data_files = tf.gfile.Glob(tf_record_pattern)
+
+        if not data_files:
+            print("Error")
+            exit(-1)
+
+        dataset = tf.data.TFRecordDataset(data_files, buffer_size=10000, num_parallel_reads=4)
+        return dataset
 class BenchMark(object):
     def __init__(self):
         """ init """
@@ -177,34 +215,42 @@ class BenchMark(object):
                 tf.logging.error("Strategy not found.")
                 return
 
-        def model_fn(features, labels):
+        # -------------- Model_fn & Input_fn --------------
+        def model_fn(features, labels, input_data_iterator):
 
             last_layer = self._network.inference(features)
+
+            # # ------------
+            # temp_sess = tf.Session()
+            # temp_sess.run(input_data_iterator.initializer)
+            # temp_sess.run(tf.global_variables_initializer())
+            # a1 = temp_sess.run([last_layer])
+            # print(a1)
+            # os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
+            # # ------------
 
             with tf.name_scope('xentropy'):
                 cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=last_layer, labels=labels)
                 loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
+            with tf.device(self.cpu_device):
+                top_1_op = tf.reduce_sum(
+                    tf.cast(tf.nn.in_top_k(last_layer, labels, 1), tf.float32))
+                top_5_op = tf.reduce_sum(
+                    tf.cast(tf.nn.in_top_k(last_layer, labels, 5), tf.float32))
 
-            with tf.name_scope('accuracy'):
-                classes = tf.argmax(input=last_layer, axis=1, name='classes')
-                batch_accuracy = tf.reduce_mean(tf.cast(tf.equal(labels, classes), tf.float32))
-
-            return loss, batch_accuracy
+            return loss, top_1_op, top_5_op
 
         def fake_input_fn():
-
             if (self._model[:9] == "inception"):
                 image_size = 299
             else:
                 image_size = 224
-
             if self._data_format == 'NCHW':
                 image_shape = [self._batch_size, 3, image_size, image_size]
             else:
                 image_shape = [self._batch_size, image_size, image_size, 3]
 
             # ----------------------- Fake Input Images -----------------------
-
             if self._worker_prefix:
                 image_device = self.cpu_device[0]
             else:
@@ -220,8 +266,46 @@ class BenchMark(object):
 
                 return tf.data.Dataset.zip((images, labels)).prefetch(1)
 
+        def imagenet_input_fn():
+            if (self._model[:9] == "inception"):
+                image_size = 299
+            else:
+                image_size = 224
+            self._image_size = image_size
+
+            if self._data_format == 'NCHW':
+                image_shape = [self._batch_size, 3, image_size, image_size]
+            else:
+                image_shape = [self._batch_size, image_size, image_size, 3]
+
+            if self._worker_prefix:
+                image_device = self.cpu_device[0]
+            else:
+                image_device = self.cpu_device
+
+            def map_fn(example_serialized):
+                image_buffer, label_index, bbox, _ = rdread.parse_example_proto(example_serialized)
+                return rdread.simple_process(image_buffer, bbox, image_size, image_size, 3, True), label_index
+
+            with tf.device(image_device), tf.name_scope('ImageNet_Input_Images'):
+                data = ImageNet_Data('ImageNet', FLAGS.work_mode)
+                dataset = data.dataset()
+                dataset = dataset.map(map_fn,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                dataset = dataset.shuffle(buffer_size=10000)
+                dataset = dataset.batch(batch_size=self._batch_size)
+                dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+                dataset = dataset.repeat(FLAGS.num_epochs)
+                return dataset
+
         self._model_fn = model_fn
-        self._input_fn = fake_input_fn
+        if FLAGS.work_mode == 'test':
+            self._input_fn = fake_input_fn
+        elif FLAGS.work_mode in ['train', 'validation']:
+            self._input_fn = imagenet_input_fn
+        else:
+            print("work_mode Error")
+            exit(-1)
 
     def build_network(self, hooks, chief_only_hooks, strategy):
 
@@ -229,6 +313,9 @@ class BenchMark(object):
             global_step = tf.train.get_or_create_global_step()
 
         gradients_list = []
+        loss_list = []
+        top_1_list = []
+        top_5_list = []
         if self._worker_prefix:
             with tf.device(self.cpu_device[0]):
                 input_data_iterator = self._input_fn().make_initializable_iterator('Input Data')
@@ -248,17 +335,34 @@ class BenchMark(object):
             for index, gpu in enumerate(self.gpu_devices):
                 with tf.device(gpu), tf.variable_scope('Tower_%i' % index, custom_getter=strategy):
                     features, labels = input_data_iterator.get_next()
-                    loss, batch_accuracy = self._model_fn(features, labels)
+                    if FLAGS.work_mode == 'train' and self._data_format == 'NCHW':
+                        features = tf.reshape(features, [self._batch_size, self._image_size, self._image_size, 3])
+                        labels = tf.reshape(labels, [self._batch_size])
+                        features = tf.transpose(features, [0, 3, 1, 2])
+                    loss, top_1, top_5 = self._model_fn(features, labels, input_data_iterator)
+                    loss_list.append(loss)
+                    top_1_list.append(top_1)
+                    top_5_list.append(top_5)
                     local_varis = strategy.get_local_variable(index)
                     # print(local_varis)
                     gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                     gradients_list.append(gradients)
 
-        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step)
+        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step, self.get_learning_rate(global_step))
 
         # -------------- Run Hooks --------------
-        logging_hook = tf.train.LoggingTensorHook({"loss": loss, "accuracy": batch_accuracy,
-                        "step": tf.train.get_global_step()}, every_n_iter=10)
+        if FLAGS.work_mode == 'test':
+            log_iter = 10
+        else:
+            log_iter = 10
+        with tf.name_scope('average_loss'):
+            average_loss = tf.reduce_mean(loss_list)
+        with tf.name_scope('top_accuracy'):
+            total_top_1 = tf.reduce_sum(top_1_list)
+            total_top_5 = tf.reduce_sum(top_5_list)
+        logging_hook = tf.train.LoggingTensorHook({"loss": average_loss,
+                        "top_1": total_top_1, "top_5": total_top_5,
+                        "step": tf.train.get_global_step()}, every_n_iter=log_iter)
         hooks.append(logging_hook)
 
         input_hook = DatasetInitializerHook(input_data_iterator)
@@ -272,7 +376,10 @@ class BenchMark(object):
         else:
             chief_only_hooks = []
 
-        hooks = [tf.train.StopAtStepHook(steps)]
+        if FLAGS.work_mode == 'test':
+            hooks = [tf.train.StopAtStepHook(steps)]
+        else:
+            hooks = []
         if FLAGS.trace_file:
             hooks.append(TraceHook(FLAGS.trace_file))
 
@@ -312,7 +419,20 @@ class BenchMark(object):
             tf.logging.info('Training Start')
 
             while not sess.should_stop():
-                sess.run(train_op)
+                res = sess.run(train_op)
+
+    def get_learning_rate(self, global_step):
+        rescaled_lr = FLAGS.learning_rate
+        num_batches_per_epoch = (1281167 / self._batch_size)
+        boundaries = [int(num_batches_per_epoch * x) for x in [30, 60, 80, 90]]
+        values = [1, 0.1, 0.01, 0.001, 0.0001]
+        values = [rescaled_lr * v for v in values]
+        lr = tf.train.piecewise_constant(global_step, boundaries, values)
+        warmup_steps = int(num_batches_per_epoch * 5)
+        warmup_lr = (
+            rescaled_lr * tf.cast(global_step, tf.float32) / tf.cast(
+                warmup_steps, tf.float32))
+        return tf.cond(global_step < warmup_steps, lambda: warmup_lr, lambda: lr)
 
 def run_benchmark():
 

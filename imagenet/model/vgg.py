@@ -63,6 +63,6 @@ class Vgg(object):
         cnn.dropout()
         cnn.affine(4096)
         cnn.dropout()
-        last = cnn.affine(1000, activation=None)
+        last = cnn.affine(1001, activation=None)
 
         return last

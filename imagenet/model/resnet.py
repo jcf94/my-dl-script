@@ -225,6 +225,6 @@ class ResNet(object):
             cnn.batch_norm()
             cnn.top_layer = tf.nn.relu(cnn.top_layer)
         cnn.spatial_mean()
-        last = cnn.affine(1000, activation=None)
+        last = cnn.affine(1001, activation=None)
 
         return last

@@ -232,7 +232,8 @@ def parse_example_proto(example_serialized):
                                     'image/object/bbox/ymax']})
 
     features = tf.parse_single_example(example_serialized, feature_map)
-    label = tf.cast(features['image/class/label'], dtype=tf.int32)
+    label = tf.cast(features['image/class/label'][0], dtype=tf.int32)
+    # label = features['image/class/label'][0]
 
     xmin = tf.expand_dims(features['image/object/bbox/xmin'].values, 0)
     ymin = tf.expand_dims(features['image/object/bbox/ymin'].values, 0)
@@ -249,6 +250,12 @@ def parse_example_proto(example_serialized):
 
     return features['image/encoded'], label, bbox, features['image/class/text']
 
+def normalized_image(images):
+    # Rescale from [0, 255] to [0, 2]
+    images = tf.multiply(images, 1. / 127.5)
+    # Rescale to [-1, 1]
+    return tf.subtract(images, 1.0)
+
 def simple_process(image_buffer, bbox, output_height, output_width,
                      num_channels, is_training=False):
     if is_training:
@@ -263,4 +270,6 @@ def simple_process(image_buffer, bbox, output_height, output_width,
 
     image.set_shape([output_height, output_width, num_channels])
 
-    return _mean_image_subtraction(image, _CHANNEL_MEANS, num_channels)
+    # return image
+    # return _mean_image_subtraction(image, _CHANNEL_MEANS, num_channels)
+    return normalized_image(image)

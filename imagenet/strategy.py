@@ -61,8 +61,8 @@ class LocalPSStrategy(object):
     def get_global_variable(self):
         return [v for k,v in self._global_variable.items()]
     
-    def compute_gradient_and_apply(self, gradients_list, global_step):
-        optimizer = tf.train.GradientDescentOptimizer(0.001)
+    def compute_gradient_and_apply(self, gradients_list, global_step, learning_rate):
+        optimizer = tf.train.GradientDescentOptimizer(learning_rate)
 
         if self._use_staging:
             input_staging_op = tf.group(self._staging_put_ops)
@@ -86,10 +86,12 @@ class LocalPSStrategy(object):
                 for g_v in zip(*gradients_list, global_varis):
                     grads = g_v[:self._num_gpus]
                     varis = g_v[self._num_gpus]
-                    with tf.device(varis.device):
-                        average_grad = tf.multiply(tf.add_n(grads), 1.0 / self._num_gpus)
-                        apply = optimizer.apply_gradients([(average_grad, varis)])
-                        apply_list.append(apply)
+                    # Some variable in BatchNorm do not have gradient
+                    if grads[0] != None:
+                        with tf.device(varis.device):
+                            average_grad = tf.multiply(tf.add_n(grads), 1.0 / self._num_gpus)
+                            apply = optimizer.apply_gradients([(average_grad, varis)])
+                            apply_list.append(apply)
                 with tf.device(global_step.device):
                     apply_list.append(global_step.assign_add(1))
                 apply_op = tf.group(apply_list)
@@ -109,6 +111,8 @@ class LocalAllreduceStrategy(object):
         self._cpu_device = BenchMark.cpu_device
         self._num_gpus = BenchMark._num_gpus
         self._gpu_devices = BenchMark.gpu_devices
+
+        self._optimizer = BenchMark._optimizer
 
         self._global_variable = {}
         self._local_variable = [
@@ -142,7 +146,7 @@ class LocalAllreduceStrategy(object):
         return [v for k,v in self._global_variable.items()]
     
     def compute_gradient_and_apply(self, gradients_list, global_step):
-        optimizer = tf.train.GradientDescentOptimizer(0.001)
+        optimizer = self._optimizer
 
         with tf.name_scope('Gradient_Update'):
             if self._num_gpus > 1:
@@ -188,6 +192,8 @@ class DistributedPSStrategy(object):
         self._total_gpus = self._num_workers * self._num_gpus
         self._param_server_device = BenchMark._param_server_device
 
+        self._optimizer = BenchMark._optimizer
+
         self._global_variable = {}
         self._local_variable = [
             [dict() for _ in range(self._num_gpus)] for _ in range(self._num_workers)
@@ -230,7 +236,7 @@ class DistributedPSStrategy(object):
         return [v for k,v in self._global_variable.items()]
     
     def compute_gradient_and_apply(self, gradients_list, global_step):
-        optimizer = tf.train.GradientDescentOptimizer(0.001)
+        optimizer = self._optimizer
 
         if self._use_staging:
             input_staging_op = tf.group(self._staging_put_ops)
@@ -289,6 +295,8 @@ class DistributedAllreduceStrategy(object):
         self._total_gpus = self._num_workers * self._num_gpus
         self._param_server_device = BenchMark._param_server_device
 
+        self._optimizer = BenchMark._optimizer
+
         self._global_variable = {}
         self._local_variable = [
             [dict() for _ in range(self._num_gpus)] for _ in range(self._num_workers)
@@ -322,7 +330,7 @@ class DistributedAllreduceStrategy(object):
         return [v for k,v in self._global_variable.items()]
     
     def compute_gradient_and_apply(self, gradients_list, global_step):
-        optimizer = tf.train.GradientDescentOptimizer(0.001)
+        optimizer = self._optimizer
 
         with tf.name_scope('Gradient_Update'):
             apply_list = []
