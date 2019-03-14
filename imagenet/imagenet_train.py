@@ -17,7 +17,7 @@ import process_imagenet_data.record_data_read as rdread
 # os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
 
 # ----- CPU / GPU Set
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 CONFIG = tf.ConfigProto()
 #CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
@@ -167,6 +167,7 @@ class BenchMark(object):
             self._network = Inception(self._data_format, self._model)
 
         self._batch_size = FLAGS.batch_size
+        self._optimizer = FLAGS.optimizer
 
         # -------------- Device Config --------------
         self._num_gpus = FLAGS.num_gpus
@@ -216,18 +217,9 @@ class BenchMark(object):
                 return
 
         # -------------- Model_fn & Input_fn --------------
-        def model_fn(features, labels, input_data_iterator):
+        def model_fn(features, labels):
 
             last_layer = self._network.inference(features)
-
-            # # ------------
-            # temp_sess = tf.Session()
-            # temp_sess.run(input_data_iterator.initializer)
-            # temp_sess.run(tf.global_variables_initializer())
-            # a1 = temp_sess.run([last_layer])
-            # print(a1)
-            # os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
-            # # ------------
 
             with tf.name_scope('xentropy'):
                 cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=last_layer, labels=labels)
@@ -293,9 +285,9 @@ class BenchMark(object):
                 dataset = dataset.map(map_fn,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 dataset = dataset.shuffle(buffer_size=10000)
-                dataset = dataset.batch(batch_size=self._batch_size)
                 dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 dataset = dataset.repeat(FLAGS.num_epochs)
+                dataset = dataset.batch(batch_size=self._batch_size)
                 return dataset
 
         self._model_fn = model_fn
@@ -339,7 +331,7 @@ class BenchMark(object):
                         features = tf.reshape(features, [self._batch_size, self._image_size, self._image_size, 3])
                         labels = tf.reshape(labels, [self._batch_size])
                         features = tf.transpose(features, [0, 3, 1, 2])
-                    loss, top_1, top_5 = self._model_fn(features, labels, input_data_iterator)
+                    loss, top_1, top_5 = self._model_fn(features, labels)
                     loss_list.append(loss)
                     top_1_list.append(top_1)
                     top_5_list.append(top_5)
@@ -348,22 +340,30 @@ class BenchMark(object):
                     gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                     gradients_list.append(gradients)
 
-        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step, self.get_learning_rate(global_step))
+        learning_rate = self.get_learning_rate(global_step)
+        tf.summary.scalar('learning_rate', learning_rate)
+        train_op = strategy.compute_gradient_and_apply(gradients_list, global_step, learning_rate)
 
         # -------------- Run Hooks --------------
         if FLAGS.work_mode == 'test':
             log_iter = 10
         else:
-            log_iter = 10
+            log_iter = 50
+
         with tf.name_scope('average_loss'):
             average_loss = tf.reduce_mean(loss_list)
+
         with tf.name_scope('top_accuracy'):
-            total_top_1 = tf.reduce_sum(top_1_list)
-            total_top_5 = tf.reduce_sum(top_5_list)
+            total_top_1 = tf.multiply(tf.reduce_sum(top_1_list), 1/(self._num_gpus * self._batch_size))
+            total_top_5 = tf.multiply(tf.reduce_sum(top_5_list), 1/(self._num_gpus * self._batch_size))
         logging_hook = tf.train.LoggingTensorHook({"loss": average_loss,
                         "top_1": total_top_1, "top_5": total_top_5,
                         "step": tf.train.get_global_step()}, every_n_iter=log_iter)
         hooks.append(logging_hook)
+
+        tf.summary.scalar('average_loss', average_loss)
+        tf.summary.scalar('top_1_accuracy', total_top_1)
+        tf.summary.scalar('top_5_accuracy', total_top_5)
 
         input_hook = DatasetInitializerHook(input_data_iterator)
         chief_only_hooks.append(input_hook)
@@ -407,8 +407,12 @@ class BenchMark(object):
             train_op = self.build_network(hooks, chief_only_hooks, self._strategy)
 
         # -------------- Session Run --------------
+        if FLAGS.work_mode == 'test':
+            checkpoint_dir = None
+        elif FLAGS.work_mode == 'train':
+            checkpoint_dir = 'train'
         with tf.train.MonitoredTrainingSession(target,
-            is_chief=is_chief, summary_dir='train', config=CONFIG,
+            is_chief=is_chief, summary_dir='train', checkpoint_dir=checkpoint_dir, config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:
             # -------------- Warmup & Pre Load Stage --------------
             if train_op.__len__() > 1:
