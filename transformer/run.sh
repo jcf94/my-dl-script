@@ -2,6 +2,8 @@
 
 source /root/miniconda/bin/activate iris_env_36
 
+export PYTHONPATH=`pwd`:$PYTHONPATH
+
 DATA_DIR=/tmp/translate_ende
 VOCAB_FILE=${DATA_DIR}/vocab.ende.32768
 
