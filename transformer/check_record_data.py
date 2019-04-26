@@ -13,7 +13,7 @@ def _parse_example(serialized_example):
     targets = tf.sparse_tensor_to_dense(parsed["targets"])
     return inputs, targets
 
-filename = ["translate_ende/wmt32k-train-00001-of-00100"]
+filename = ["wmt14_data/wmt32k-train-00001-of-00100"]
 dataset = tf.data.TFRecordDataset(filename)
 
 dataset = dataset.map(_parse_example)

@@ -374,8 +374,8 @@ def define_transformer_flags():
   flags_core.define_base()
   flags_core.define_performance(
       num_parallel_calls=True,
-      inter_op=False,
-      intra_op=False,
+      inter_op=True,
+      intra_op=True,
       synthetic_data=True,
       max_train_steps=False,
       dtype=False,
@@ -493,6 +493,11 @@ def construct_estimator(flags_obj, params, schedule_manager):
   Returns:
     An estimator object to be used for training and eval.
   """
+  
+  print("============== all_reduce_alg ==============")
+  print(flags_obj.all_reduce_alg)
+  print("============== all_reduce_alg ==============")
+
   if not params["use_tpu"]:
     distribution_strategy = distribution_utils.get_distribution_strategy(
         flags_core.get_num_gpus(flags_obj), flags_obj.all_reduce_alg)
@@ -564,6 +569,10 @@ def run_transformer(flags_obj):
   if not params["use_tpu"]:
     params["batch_size"] = distribution_utils.per_device_batch_size(
         params["batch_size"], num_gpus)
+  
+  print("============== Batch Size for each GPU ==============")
+  print(params["batch_size"])
+  print("============== Batch Size for each GPU ==============")
 
   schedule_manager = schedule.Manager(
       train_steps=flags_obj.train_steps,
@@ -581,10 +590,15 @@ def run_transformer(flags_obj):
 
   model_helpers.apply_clean(flags.FLAGS)
 
+  print("============== Train Hooks ==============")
+  print(flags_obj.hooks)
+  print("============== Train Hooks ==============")
+
   # Create hooks that log information about the training and metric values
   train_hooks = hooks_helper.get_train_hooks(
       flags_obj.hooks,
       model_dir=flags_obj.model_dir,
+      save_steps=200,
       tensors_to_log=TENSORS_TO_LOG,  # used for logging hooks
       batch_size=schedule_manager.batch_size,  # for ExamplesPerSecondHook
       use_tpu=params["use_tpu"]  # Not all hooks can run with TPUs
