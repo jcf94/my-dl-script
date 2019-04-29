@@ -28,4 +28,4 @@ FLAGS="--param_set=${PARAM_SET}
 
 # python data_download.py --data_dir=${DATA_DIR}
 
-python transformer_main.py ${FLAGS}
+python transformer_main_noestimator.py ${FLAGS}
