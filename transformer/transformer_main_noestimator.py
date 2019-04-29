@@ -108,19 +108,10 @@ def model_fn(features, labels, mode, params):
     tf.identity(loss, "cross_entropy")
 
     if mode == tf.estimator.ModeKeys.EVAL:
-      if params["use_tpu"]:
-        # host call functions should only have tensors as arguments.
-        # This lambda pre-populates params so that metric_fn is
-        # TPUEstimator compliant.
-        metric_fn = lambda logits, labels: (
-            metrics.get_eval_metrics(logits, labels, params=params))
-        eval_metrics = (metric_fn, [logits, labels])
-        return tf.contrib.tpu.TPUEstimatorSpec(
-            mode=mode, loss=loss, predictions={"predictions": logits},
-            eval_metrics=eval_metrics)
-      return tf.estimator.EstimatorSpec(
-          mode=mode, loss=loss, predictions={"predictions": logits},
-          eval_metric_ops=metrics.get_eval_metrics(logits, labels, params))
+    #   return tf.estimator.EstimatorSpec(
+    #       mode=mode, loss=loss, predictions={"predictions": logits},
+    #       eval_metric_ops=metrics.get_eval_metrics(logits, labels, params))
+      return loss, {"predictions": logits}, metrics.get_eval_metrics(logits, labels, params)
     else:
       train_op, metric_dict = get_train_op_and_metrics(loss, params)
 
@@ -135,7 +126,8 @@ def model_fn(features, labels, mode, params):
                 prefix="training/")
         )
       record_scalars(metric_dict)
-      return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op)
+      #return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op)
+      return loss, train_op
 
 
 def record_scalars(metric_dict):
@@ -244,7 +236,7 @@ def _validate_file(filepath):
 
 
 def run_loop(
-    estimator, schedule_manager, train_hooks=None, benchmark_logger=None,
+    network, schedule_manager, train_hooks=None, benchmark_logger=None,
     bleu_source=None, bleu_ref=None, bleu_threshold=None, vocab_file=None):
   """Train and evaluate model, and optionally compute model's BLEU score.
 
@@ -315,7 +307,7 @@ def run_loop(
     # Create summary writer to log bleu score (values can be displayed in
     # Tensorboard).
     bleu_writer = tf.summary.FileWriter(
-        os.path.join(estimator.model_dir, BLEU_DIR))
+        os.path.join(network.model_dir, BLEU_DIR))
     if bleu_threshold is not None:
       # Change loop stopping condition if bleu_threshold is defined.
       schedule_manager.train_eval_iterations = INF
@@ -326,12 +318,12 @@ def run_loop(
 
     # Train the model for single_iteration_train_steps or until the input fn
     # runs out of examples (if single_iteration_train_steps is None).
-    estimator.train(
+    network.train(
         dataset.train_input_fn,
         steps=schedule_manager.single_iteration_train_steps,
         hooks=train_hooks)
 
-    eval_results = estimator.evaluate(
+    eval_results = network.evaluate(
         input_fn=dataset.eval_input_fn,
         steps=schedule_manager.single_iteration_eval_steps)
 
@@ -481,57 +473,75 @@ def define_transformer_flags():
 
   flags_core.require_cloud_storage(["data_dir", "model_dir", "export_dir"])
 
+class DatasetInitializerHook(tf.train.SessionRunHook):
+    def __init__(self, iterator):
+        self._iterator = iterator
 
-def construct_estimator(flags_obj, params, schedule_manager):
-  """Construct an estimator from either Estimator or TPUEstimator.
+    def begin(self):
+        self._initializer = self._iterator.initializer
 
-  Args:
-    flags_obj: The FLAGS object parsed from command line.
-    params: A dict of run specific parameters.
-    schedule_manager: A schedule.Manager object containing the run schedule.
+    def after_create_session(self, session, coord):
+        del coord
+        session.run(self._initializer)
 
-  Returns:
-    An estimator object to be used for training and eval.
-  """
-  
-  print("============== all_reduce_alg ==============")
-  print(flags_obj.all_reduce_alg)
-  print("============== all_reduce_alg ==============")
+class Network(object):
 
-  if not params["use_tpu"]:
-    distribution_strategy = distribution_utils.get_distribution_strategy(
-        flags_core.get_num_gpus(flags_obj), flags_obj.all_reduce_alg)
-    return tf.estimator.Estimator(
-        model_fn=model_fn, model_dir=flags_obj.model_dir, params=params,
-        config=tf.estimator.RunConfig(train_distribute=distribution_strategy))
+    def __init__(self, model_fn, model_dir, params, config=None):
+        self.model_fn = model_fn
+        self.model_dir = model_dir
+        self.params = params
+        self.config = config
 
-  tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
-      tpu=flags_obj.tpu,
-      zone=flags_obj.tpu_zone,
-      project=flags_obj.tpu_gcp_project
-  )
+    def train(self, input_fn, steps, hooks):
+        print("============== Train ==============")
 
-  tpu_config = tf.contrib.tpu.TPUConfig(
-      iterations_per_loop=schedule_manager.single_iteration_train_steps,
-      num_shards=flags_obj.num_tpu_shards)
+        input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
 
-  run_config = tf.contrib.tpu.RunConfig(
-      cluster=tpu_cluster_resolver,
-      model_dir=flags_obj.model_dir,
-      session_config=tf.ConfigProto(
-          allow_soft_placement=True, log_device_placement=True),
-      tpu_config=tpu_config)
+        hooks.append(DatasetInitializerHook(input_iterator))
 
-  return tf.contrib.tpu.TPUEstimator(
-      model_fn=model_fn,
-      use_tpu=params["use_tpu"] and flags_obj.tpu != tpu_util.LOCAL,
-      train_batch_size=schedule_manager.batch_size,
-      eval_batch_size=schedule_manager.batch_size,
-      params={
-          # TPUEstimator needs to populate batch_size itself due to sharding.
-          key: value for key, value in params.items() if key != "batch_size"},
-      config=run_config)
+        features, labels = input_iterator.get_next()
 
+        loss, train_op = model_fn(features, labels, mode=tf.estimator.ModeKeys.TRAIN, params=self.params)
+
+        with tf.train.MonitoredTrainingSession(
+            checkpoint_dir=self.model_dir,
+            hooks=hooks, summary_dir=self.model_dir) as sess:
+
+            while not sess.should_stop():
+                sess.run(train_op)
+
+    def evaluate(self, input_fn, steps):
+        print("============== Evaluate ==============")
+
+        input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
+
+        features, labels = input_iterator.get_next()
+
+        loss, predictions, eval_metric_ops = model_fn(features, labels, mode=tf.estimator.ModeKeys.EVAL, params=self.params)
+
+        with tf.train.MonitoredTrainingSession(hooks=DatasetInitializerHook(input_iterator)) as sess:
+            while not sess.should_stop():
+                sess.run([loss, predictions, eval_metric_ops])
+
+def construct_network(flags_obj, params, schedule_manager):
+    """Construct an estimator from either Estimator or TPUEstimator.
+
+    Args:
+        flags_obj: The FLAGS object parsed from command line.
+        params: A dict of run specific parameters.
+        schedule_manager: A schedule.Manager object containing the run schedule.
+
+    Returns:
+        An estimator object to be used for training and eval.
+    """
+
+    print("============== all_reduce_alg ==============")
+    print(flags_obj.all_reduce_alg)
+    print("Construct Network")
+    print("============== all_reduce_alg ==============")
+
+    return Network(
+        model_fn=model_fn, model_dir=flags_obj.model_dir, params=params)
 
 def run_transformer(flags_obj):
   """Create tf.Estimator to train and evaluate transformer model.
@@ -611,9 +621,9 @@ def run_transformer(flags_obj):
       test_id=flags_obj.benchmark_test_id)
 
   # Train and evaluate transformer model
-  estimator = construct_estimator(flags_obj, params, schedule_manager)
+  network = construct_network(flags_obj, params, schedule_manager)
   run_loop(
-      estimator=estimator,
+      network=network,
       # Training arguments
       schedule_manager=schedule_manager,
       train_hooks=train_hooks,
@@ -633,10 +643,10 @@ def run_transformer(flags_obj):
     # how to use the vocab file.)
     # Since the model itself does not use the vocab file, this file is saved as
     # an extra asset rather than a core asset.
-    estimator.export_savedmodel(
-        flags_obj.export_dir, serving_input_fn,
-        assets_extra={"vocab.txt": flags_obj.vocab_file},
-        strip_default_attrs=True)
+    # estimator.export_savedmodel(
+    #     flags_obj.export_dir, serving_input_fn,
+    #     assets_extra={"vocab.txt": flags_obj.vocab_file},
+    #     strip_default_attrs=True)
 
 
 def main(_):
