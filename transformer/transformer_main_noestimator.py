@@ -18,6 +18,8 @@ See README for description of setting the training schedule and evaluating the
 BLEU score.
 """
 
+# Currently, this version is only for throughput testing
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -48,6 +50,8 @@ from utils.logs import logger
 from utils.misc import distribution_utils
 from utils.misc import model_helpers
 
+from strategy import LocalPSStrategy
+
 PARAMS_MAP = {
     "tiny": model_params.TINY_PARAMS,
     "base": model_params.BASE_PARAMS,
@@ -62,8 +66,8 @@ BLEU_DIR = "bleu"
 # Dictionary containing tensors that are logged by the logging hooks. Each item
 # maps a string to the tensor name.
 TENSORS_TO_LOG = {
-    "learning_rate": "model/get_train_op/learning_rate/learning_rate",
-    "cross_entropy_loss": "model/cross_entropy"}
+    "learning_rate": "get_train_op/learning_rate/learning_rate",
+    "cross_entropy_loss": "Benchmark/Tower_0/model/cross_entropy"}
 
 
 def model_fn(features, labels, mode, params):
@@ -113,6 +117,10 @@ def model_fn(features, labels, mode, params):
     #       eval_metric_ops=metrics.get_eval_metrics(logits, labels, params))
       return loss, {"predictions": logits}, metrics.get_eval_metrics(logits, labels, params)
     else:
+      # ============== Directly Return Forward Path ==============
+      return loss
+      # ============== Directly Return Forward Path ==============
+
       train_op, metric_dict = get_train_op_and_metrics(loss, params)
 
       # Epochs can be quite long. This gives some intermediate information
@@ -170,9 +178,6 @@ def get_train_op_and_metrics(loss, params):
         beta1=params["optimizer_adam_beta1"],
         beta2=params["optimizer_adam_beta2"],
         epsilon=params["optimizer_adam_epsilon"])
-
-    if params["use_tpu"] and params["tpu"] != tpu_util.LOCAL:
-      optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
 
     # Calculate and apply gradients using LazyAdamOptimizer.
     global_step = tf.train.get_global_step()
@@ -486,26 +491,76 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
 
 class Network(object):
 
-    def __init__(self, model_fn, model_dir, params, config=None):
+    def __init__(self, num_gpus, model_fn, model_dir, params, config=None):
+        self.num_gpus = num_gpus
         self.model_fn = model_fn
         self.model_dir = model_dir
         self.params = params
         self.config = config
 
     def train(self, input_fn, steps, hooks):
-        print("============== Train ==============")
+        print("============== Model Build ==============")
 
-        input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
+        gpu_devices = [
+            '/device:GPU:%i' % i
+            for i in range(self.num_gpus)
+        ]
+
+        strategy = LocalPSStrategy('/device:CPU:0', gpu_devices, self.num_gpus)
+
+        with tf.device('/device:CPU:0'):
+            input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
 
         hooks.append(DatasetInitializerHook(input_iterator))
 
-        features, labels = input_iterator.get_next()
+        gradients_list = []
 
-        loss, train_op = model_fn(features, labels, mode=tf.estimator.ModeKeys.TRAIN, params=self.params)
+        for index, gpu in enumerate(gpu_devices):
+            with tf.device(gpu), tf.variable_scope('Benchmark/Tower_%i' % index, custom_getter=strategy):
+                features, labels = input_iterator.get_next()
+                loss = model_fn(features, labels, mode=tf.estimator.ModeKeys.TRAIN, params=self.params)
+                local_varis = strategy.get_local_variable(index)
+                # ============== Notice ==============
+                # local_varis[0] is embedding_shared_weights
+                # Tensorflow's gradient compute seems to have problem when
+                # this is done by tf.gather
+                # Disable this for parameter server running
+                # ============== Notice ==============
+                print(local_varis[0])
+                #local_varis = local_varis[1:]
+                print(local_varis.__len__())
+                gradients = tf.gradients(loss, local_varis)
+                gradients[0] = tf.convert_to_tensor(gradients[0])
+                print(gradients[0])
+                # gradients = gradients[1:]
+                gradients_list.append(gradients)
+
+        with tf.variable_scope("get_train_op"):
+            learning_rate = get_learning_rate(
+                learning_rate=self.params["learning_rate"],
+                hidden_size=self.params["hidden_size"],
+                learning_rate_warmup_steps=self.params["learning_rate_warmup_steps"])
+
+            # Create optimizer. Use LazyAdamOptimizer from TF contrib, which is faster
+            # than the TF core Adam optimizer.
+            optimizer = tf.contrib.opt.LazyAdamOptimizer(
+                learning_rate,
+                beta1=self.params["optimizer_adam_beta1"],
+                beta2=self.params["optimizer_adam_beta2"],
+                epsilon=self.params["optimizer_adam_epsilon"])
+
+            global_step = tf.train.get_global_step()
+            train_op = strategy.compute_gradient_and_apply(gradients_list, global_step, learning_rate, optimizer)
+
+        print("============== Train ==============")
 
         with tf.train.MonitoredTrainingSession(
             checkpoint_dir=self.model_dir,
-            hooks=hooks, summary_dir=self.model_dir) as sess:
+            hooks=hooks, summary_dir=self.model_dir, config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+            if train_op.__len__() > 1:
+                for i in range(len(train_op)):
+                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i]))
+                print('Staging Pre Load')
 
             while not sess.should_stop():
                 sess.run(train_op)
@@ -513,17 +568,17 @@ class Network(object):
     def evaluate(self, input_fn, steps):
         print("============== Evaluate ==============")
 
-        input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
+        # input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
 
-        features, labels = input_iterator.get_next()
+        # features, labels = input_iterator.get_next()
 
-        loss, predictions, eval_metric_ops = model_fn(features, labels, mode=tf.estimator.ModeKeys.EVAL, params=self.params)
+        # loss, predictions, eval_metric_ops = model_fn(features, labels, mode=tf.estimator.ModeKeys.EVAL, params=self.params)
 
-        with tf.train.MonitoredTrainingSession(hooks=DatasetInitializerHook(input_iterator)) as sess:
-            while not sess.should_stop():
-                sess.run([loss, predictions, eval_metric_ops])
+        # with tf.train.MonitoredTrainingSession(hooks=DatasetInitializerHook(input_iterator)) as sess:
+        #     while not sess.should_stop():
+        #         sess.run([loss, predictions, eval_metric_ops])
 
-def construct_network(flags_obj, params, schedule_manager):
+def construct_network(num_gpus, flags_obj, params, schedule_manager):
     """Construct an estimator from either Estimator or TPUEstimator.
 
     Args:
@@ -540,7 +595,7 @@ def construct_network(flags_obj, params, schedule_manager):
     print("Construct Network")
     print("============== all_reduce_alg ==============")
 
-    return Network(
+    return Network(num_gpus=num_gpus,
         model_fn=model_fn, model_dir=flags_obj.model_dir, params=params)
 
 def run_transformer(flags_obj):
@@ -621,7 +676,7 @@ def run_transformer(flags_obj):
       test_id=flags_obj.benchmark_test_id)
 
   # Train and evaluate transformer model
-  network = construct_network(flags_obj, params, schedule_manager)
+  network = construct_network(num_gpus, flags_obj, params, schedule_manager)
   run_loop(
       network=network,
       # Training arguments
