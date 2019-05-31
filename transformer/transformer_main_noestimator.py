@@ -50,7 +50,8 @@ from utils.logs import logger
 from utils.misc import distribution_utils
 from utils.misc import model_helpers
 
-from strategy import LocalPSStrategy
+from tensorflow.python.client import timeline
+from strategy import LocalPSStrategy, DistributedPSStrategy
 
 PARAMS_MAP = {
     "tiny": model_params.TINY_PARAMS,
@@ -83,8 +84,6 @@ def model_fn(features, labels, mode, params):
     # When in prediction mode, the labels/targets is None. The model output
     # is the prediction
     if mode == tf.estimator.ModeKeys.PREDICT:
-      if params["use_tpu"]:
-        raise NotImplementedError("Prediction is not yet supported on TPUs.")
       return tf.estimator.EstimatorSpec(
           tf.estimator.ModeKeys.PREDICT,
           predictions=logits,
@@ -120,23 +119,6 @@ def model_fn(features, labels, mode, params):
       # ============== Directly Return Forward Path ==============
       return loss
       # ============== Directly Return Forward Path ==============
-
-      train_op, metric_dict = get_train_op_and_metrics(loss, params)
-
-      # Epochs can be quite long. This gives some intermediate information
-      # in TensorBoard.
-      metric_dict["minibatch_loss"] = loss
-      if params["use_tpu"]:
-        return tf.contrib.tpu.TPUEstimatorSpec(
-            mode=mode, loss=loss, train_op=train_op,
-            host_call=tpu_util.construct_scalar_host_call(
-                metric_dict=metric_dict, model_dir=params["model_dir"],
-                prefix="training/")
-        )
-      record_scalars(metric_dict)
-      #return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op)
-      return loss, train_op
-
 
 def record_scalars(metric_dict):
   for key, value in metric_dict.items():
@@ -318,7 +300,8 @@ def run_loop(
       schedule_manager.train_eval_iterations = INF
 
   # Loop training/evaluation/bleu cycles
-  for i in xrange(schedule_manager.train_eval_iterations):
+  # for i in xrange(schedule_manager.train_eval_iterations):
+  for i in range(1):
     tf.logging.info("Starting iteration %d" % (i + 1))
 
     # Train the model for single_iteration_train_steps or until the input fn
@@ -327,6 +310,10 @@ def run_loop(
         dataset.train_input_fn,
         steps=schedule_manager.single_iteration_train_steps,
         hooks=train_hooks)
+
+    # ============== Directly Exit ==============
+    break
+    # ============== Directly Exit ==============
 
     eval_results = network.evaluate(
         input_fn=dataset.eval_input_fn,
@@ -445,6 +432,10 @@ def define_transformer_flags():
                           batch_size=None,
                           train_epochs=None)
 
+  flags.DEFINE_string('worker_hosts', '', 'Comma-separated list of target hosts')
+  flags.DEFINE_integer('task_index', 0, 'Index of task within the job')
+  flags.DEFINE_string('server_protocol', 'grpc', 'protocol for servers')
+
   @flags.multi_flags_validator(
       ["train_epochs", "train_steps"],
       message="Both --train_steps and --train_epochs were set. Only one may be "
@@ -489,6 +480,41 @@ class DatasetInitializerHook(tf.train.SessionRunHook):
         del coord
         session.run(self._initializer)
 
+class TraceHook(tf.train.SessionRunHook):
+    """Hook to perform Traces every N steps."""
+
+    def __init__(self, trace_file, target_step=50, trace_level=tf.RunOptions.FULL_TRACE):
+        self._trace = target_step == 1
+        self._trace_file = trace_file
+        self._trace_level = trace_level
+        self._target_step = target_step
+        self._now_step = 1
+
+    def begin(self):
+        self._global_step_tensor = tf.train.get_global_step()
+        if self._global_step_tensor is None:
+            raise RuntimeError("Global step should be created to use _TraceHook.")
+
+    def before_run(self, run_context):
+        if self._trace:
+            options = tf.RunOptions(trace_level=self._trace_level)
+        else:
+            options = None
+        return tf.train.SessionRunArgs(fetches=[self._global_step_tensor], options=options)
+
+    def after_run(self, run_context, run_values):
+        if self._trace:
+            self._trace = False
+            fetched_timeline = timeline.Timeline(run_values.run_metadata.step_stats)
+            chrome_trace = fetched_timeline.generate_chrome_trace_format()
+            with open(self._trace_file, 'w') as f:
+                f.write(chrome_trace)
+            print('Chrome Trace File write in %s' % self._trace_file)
+
+        self._now_step += 1
+        if self._now_step == self._target_step:
+            self._trace = True
+
 class Network(object):
 
     def __init__(self, num_gpus, model_fn, model_dir, params, config=None):
@@ -499,14 +525,32 @@ class Network(object):
         self.config = config
 
     def train(self, input_fn, steps, hooks):
+
+        print(self.params["worker_hosts"])
+        print(self.params["task_index"])
+        print(self.params["server_protocol"])
+
         print("============== Model Build ==============")
 
-        gpu_devices = [
-            '/device:GPU:%i' % i
-            for i in range(self.num_gpus)
-        ]
+        if self.params["worker_hosts"]:
+            self.worker_hosts = self.params["worker_hosts"].split(",")
+            self.num_workers = self.worker_hosts.__len__()
+            self.worker_prefix = ['/job:worker/replica:0/task:%s' % i for i in range(self.num_workers)]
+            cpu_devices = ['%s/cpu:0' % prefix for prefix in self.worker_prefix]
+            gpu_devices = [
+                ['%s/%s:%i' % (prefix, 'device:GPU', i)
+                for i in range(self.num_gpus)]
+                for prefix in self.worker_prefix
+            ]
 
-        strategy = LocalPSStrategy('/device:CPU:0', gpu_devices, self.num_gpus)
+            strategy = DistributedPSStrategy(cpu_devices, gpu_devices, self.num_workers, self.num_gpus)
+        else:
+            gpu_devices = [
+                '/device:GPU:%i' % i
+                for i in range(self.num_gpus)
+            ]
+
+            strategy = LocalPSStrategy('/device:CPU:0', gpu_devices, self.num_gpus)
 
         with tf.device('/device:CPU:0'):
             input_iterator = input_fn(self.params).make_initializable_iterator('Input Data')
@@ -520,19 +564,7 @@ class Network(object):
                 features, labels = input_iterator.get_next()
                 loss = model_fn(features, labels, mode=tf.estimator.ModeKeys.TRAIN, params=self.params)
                 local_varis = strategy.get_local_variable(index)
-                # ============== Notice ==============
-                # local_varis[0] is embedding_shared_weights
-                # Tensorflow's gradient compute seems to have problem when
-                # this is done by tf.gather
-                # Disable this for parameter server running
-                # ============== Notice ==============
-                print(local_varis[0])
-                #local_varis = local_varis[1:]
-                print(local_varis.__len__())
                 gradients = tf.gradients(loss, local_varis)
-                gradients[0] = tf.convert_to_tensor(gradients[0])
-                print(gradients[0])
-                # gradients = gradients[1:]
                 gradients_list.append(gradients)
 
         with tf.variable_scope("get_train_op"):
@@ -552,14 +584,24 @@ class Network(object):
             global_step = tf.train.get_global_step()
             train_op = strategy.compute_gradient_and_apply(gradients_list, global_step, learning_rate, optimizer)
 
+            metric_dict = {"learning_rate": learning_rate}
+            metric_dict["minibatch_loss"] = loss
+            record_scalars(metric_dict)
+
         print("============== Train ==============")
+
+        #hooks.append(TraceHook('timeline-8-staging-cpu-intra.json'))
+        print(hooks)
 
         with tf.train.MonitoredTrainingSession(
             checkpoint_dir=self.model_dir,
-            hooks=hooks, summary_dir=self.model_dir, config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+            hooks=hooks, summary_dir=self.model_dir, config=tf.ConfigProto(allow_soft_placement=True, inter_op_parallelism_threads=0, use_per_session_threads=True), save_checkpoint_steps=1000) as sess:
+
             if train_op.__len__() > 1:
                 for i in range(len(train_op)):
-                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i]))
+                    print(i)
+                    print(train_op[:i])
+                    sess.run_step_fn(lambda step_context: step_context.session.run(train_op[:i+1]))
                 print('Staging Pre Load')
 
             while not sess.should_stop():
@@ -625,6 +667,10 @@ def run_transformer(flags_obj):
 
   params["use_synthetic_data"] = flags_obj.use_synthetic_data
 
+  params["worker_hosts"] = flags_obj.worker_hosts
+  params["task_index"] = flags_obj.task_index
+  params["server_protocol"] = flags_obj.server_protocol
+
   # Set batch size parameter, which depends on the availability of
   # TPU and GPU, and distribution settings.
   params["batch_size"] = (flags_obj.batch_size or (
@@ -636,7 +682,7 @@ def run_transformer(flags_obj):
         params["batch_size"], num_gpus)
   
   print("============== Batch Size for each GPU ==============")
-  print(params["batch_size"])
+  print("Batch Size for each GPU", params["batch_size"])
   print("============== Batch Size for each GPU ==============")
 
   schedule_manager = schedule.Manager(
@@ -663,10 +709,9 @@ def run_transformer(flags_obj):
   train_hooks = hooks_helper.get_train_hooks(
       flags_obj.hooks,
       model_dir=flags_obj.model_dir,
-      save_steps=200,
+      save_steps=5000,
       tensors_to_log=TENSORS_TO_LOG,  # used for logging hooks
-      batch_size=schedule_manager.batch_size,  # for ExamplesPerSecondHook
-      use_tpu=params["use_tpu"]  # Not all hooks can run with TPUs
+      batch_size=schedule_manager.batch_size  # for ExamplesPerSecondHook
   )
   benchmark_logger = logger.get_benchmark_logger()
   benchmark_logger.log_run_info(
@@ -705,6 +750,7 @@ def run_transformer(flags_obj):
 
 
 def main(_):
+  print("============== Main ==============")
   with logger.benchmark_context(flags.FLAGS):
     run_transformer(flags.FLAGS)
 

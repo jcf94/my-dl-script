@@ -322,6 +322,7 @@ def run_loop(
 
   # Loop training/evaluation/bleu cycles
   for i in xrange(schedule_manager.train_eval_iterations):
+  #for i in xrange(1):
     tf.logging.info("Starting iteration %d" % (i + 1))
 
     # Train the model for single_iteration_train_steps or until the input fn
@@ -329,7 +330,9 @@ def run_loop(
     estimator.train(
         dataset.train_input_fn,
         steps=schedule_manager.single_iteration_train_steps,
+        #steps=50,
         hooks=train_hooks)
+    #break
 
     eval_results = estimator.evaluate(
         input_fn=dataset.eval_input_fn,

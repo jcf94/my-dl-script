@@ -94,7 +94,7 @@ def get_logging_tensor_hook(every_n_iter=100, tensors_to_log=None, **kwargs):  #
       every_n_iter=every_n_iter)
 
 
-def get_profiler_hook(model_dir, save_steps=1000, **kwargs):  # pylint: disable=unused-argument
+def get_profiler_hook(model_dir, save_steps=200, **kwargs):  # pylint: disable=unused-argument
   """Function to get ProfilerHook.
 
   Args:

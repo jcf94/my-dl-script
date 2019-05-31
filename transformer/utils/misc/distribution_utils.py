@@ -46,6 +46,8 @@ def get_distribution_strategy(num_gpus, all_reduce_alg=None):
               all_reduce_alg, num_packs=2))
     else:
       return tf.contrib.distribute.MirroredStrategy(num_gpus=num_gpus)
+      #print("Parameter Server")
+      #return tf.contrib.distribute.ParameterServerStrategy(num_gpus_per_worker=num_gpus)
 
 
 def per_device_batch_size(batch_size, num_gpus):
